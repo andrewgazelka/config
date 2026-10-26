@@ -1,0 +1,43 @@
+# Global gitignore (core.excludesFile). A pattern here applies to every repo,
+# and an entry without a leading / matches at EVERY depth:
+# so unanchored entries must sit under a dot-directory or be a name no source file uses.
+
+# Editor and OS droppings.
+.DS_Store
+.idea
+*.xcuserstate
+xcuserdata/
+.direnv
+.zsync
+.vercel
+.sgrep
+.pytest_cache/
+.ruff_cache/
+
+# Agent and tool scratch.
+**/.claude/settings.local.json
+**/.claude/worktrees/
+**/.claude/fix
+.codex-output/
+.codex-reports/
+.Codex/
+.worktrees/
+
+# Generated names no project uses for source.
+node_modules
+buck-out
+target-clippy
+target-check
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+_deps/
+cpm-package-lock.cmake
+
+# Build outputs whose names are also ordinary source names: anchored.
+/build/
+/_build/
+/target
+/result
+/result-*
+/dump*.json

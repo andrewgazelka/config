@@ -1,0 +1,6 @@
+result
+result-*
+/strata/target
+.direnv/
+.DS_Store
+/private/
