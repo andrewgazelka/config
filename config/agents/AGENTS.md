@@ -11,3 +11,4 @@
 
 - Web search: use Exa (`web_search_exa`, `web_fetch_exa`, `agent_run` for multi-step research) instead of the built-in WebSearch/WebFetch.
 - Before building, recommending or researching a tool, search GitHub for similar projects first with `gh api -X GET search/repositories -f q="<terms> pushed:>YYYY-MM-DD" -f sort=stars` (and `search/code` when needed), alongside Exa. Name what already exists before proposing to build or pick something.
+- Choose dependencies and designs on capability and fit, never on API stability or implementation language: agents absorb churn, forks, internal APIs and glue in any language. Prefer the deeper integration (fork it, use the internal API, write the C++ extension) over a shallower stable one, and don't count "no bindings for X" or "unstable interface" as costs.
