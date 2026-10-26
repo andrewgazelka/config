@@ -5,10 +5,9 @@ use ($nu.default-config-dir | path join completions.nu) *
 $env.PROMPT_INDICATOR_VI_INSERT = ""
 $env.PROMPT_INDICATOR_VI_NORMAL = ""
 
-# LS_COLORS follows the macOS appearance.
+# LS_COLORS uses only the 16 ANSI colors, so it follows Ghostty's palette in light and dark.
 if (which vivid | is-not-empty) {
-    let dark = $nu.os-info.name != macos or (^defaults read -g AppleInterfaceStyle | complete).stdout =~ Dark
-    $env.LS_COLORS = ^vivid generate (if $dark { "snazzy" } else { "one-light" })
+    $env.LS_COLORS = ^vivid generate ansi
 }
 
 alias vim = nvim
