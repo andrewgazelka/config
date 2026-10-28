@@ -10,7 +10,11 @@ description: Push the current branch, watch its CI, and fix failures until it is
 2. Push: `git push -u origin HEAD`.
 3. Find the PR with `gh pr view`. If there is none, create it with
    `gh pr create --fill`, adding `--draft` unless merging was asked for.
-4. Watch: `gh pr checks --watch --fail-fast`.
+4. Watch: `gh pr checks <N> --watch --fail-fast` as a background job (Bash
+   `run_in_background`, or a Monitor), so the first red check wakes you
+   instead of you finding it later. Keep that watch running after you hand
+   the PR to a landing tool: a merge daemon parks a red PR and tells nobody.
+   Re-arm the watch on every push, because a new head starts new checks.
 5. On failure, read the log (`gh run view <run-id> --log-failed`), fix the
    cause, commit (amend if it belongs to the same change), push, and watch again.
 6. Stop and report when:
@@ -18,7 +22,9 @@ description: Push the current branch, watch its CI, and fix failures until it is
    - the fix needs a design change,
    - the failure is external (outage, flaky network) and a retry failed too, or
    - the same error came back three times.
-7. If merging was asked for: `gh pr merge --auto`. Once it merges, switch to
-   the default branch and delete the local branch.
+7. If merging was asked for, use the repo's own landing tool when it has one
+   (ix: `scripts/ci/enqueue N --owner <lane>`, never `gh pr merge --auto`,
+   which skips its review gate). Otherwise `gh pr merge --auto`. Once it
+   merges, switch to the default branch and delete the local branch.
 
 Report what you fixed and the final CI state.
