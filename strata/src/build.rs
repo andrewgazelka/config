@@ -10,8 +10,9 @@ use anyhow::{Context, Result};
 use salsa::Setter;
 
 use crate::db::{self, Blob, Db, FILES, RootDb, Slot, Source};
+use crate::document::{Doc, Format};
 use crate::eval::normalize;
-use crate::store::{Content, Kind, Unit};
+use crate::store::{Content, Inputs, Kind, Unit};
 use crate::syntax::{Diag, Sources, Span};
 use crate::value::Value;
 
@@ -39,27 +40,86 @@ pub struct Root {
 
 pub struct Loaded {
     pub db: RootDb,
+    /// Every config directory in the build: the ones given, then the layers
+    /// they declare, in the order found.
     pub roots: Vec<Root>,
+    /// `layer optional` directories that don't exist, as shown.
+    pub missing: Vec<PathBuf>,
+    /// What the sources declare about the build itself; a change to it
+    /// needs a fresh `load`, not a refresh.
+    pub decls: Decls,
+    home: PathBuf,
 }
 
-/// `optional` directories join the config when they exist and are skipped
-/// when they don't, so a public checkout builds without its private half.
-pub fn load(configs: &[PathBuf], optional: &[PathBuf], facts: &[(String, PathBuf)]) -> Result<Loaded> {
+/// The `layer` and outside-config `facts` statements of a config.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Decls {
+    /// (directory as written, optional); relative to the declaring file.
+    pub layers: Vec<(String, bool)>,
+    /// Fact table name -> the file it is read from.
+    pub facts: Vec<(String, PathBuf)>,
+}
+
+impl Decls {
+    fn add(&mut self, text: &str, home: &Path) {
+        use crate::syntax::ast::{FactSource, Stmt};
+        // A file that doesn't parse declares nothing here; `check` reports it.
+        let Ok(stmts) = crate::syntax::parser::parse(text, 0) else { return };
+        for s in stmts {
+            match s {
+                Stmt::Layer { dir, optional, .. } => self.layers.push((dir, optional)),
+                Stmt::Facts { name, source: FactSource::Json(p), .. } if crate::lower::outside_config(&p) => {
+                    let path = match p.strip_prefix("~/") {
+                        Some(rest) => home.join(rest),
+                        None => PathBuf::from(p),
+                    };
+                    self.facts.push((name.name.to_string(), path));
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Builds `configs` and every layer they declare (`layer "../other"`),
+/// transitively, so every caller builds the same generation from the same
+/// directory. `layer optional` directories are skipped when they don't
+/// exist and listed in `missing`. `home` is what `~/` means in fact paths.
+pub fn load(configs: &[PathBuf], home: &Path) -> Result<Loaded> {
     let mut sources = Vec::new();
     for (name, text) in STDLIB {
         sources.push((format!("<stdlib>/{name}"), "<stdlib>".to_string(), text.to_string()));
     }
     let mut blobs = BTreeMap::new();
-    let mut roots = Vec::new();
-    for c in configs.iter().chain(optional.iter().filter(|o| o.exists())) {
-        let abs = fs::canonicalize(c).with_context(|| format!("config directory {}", c.display()))?;
-        let shown = normalize(c);
+    let mut roots: Vec<Root> = Vec::new();
+    let mut missing = Vec::new();
+    let mut decls = Decls::default();
+    // (as shown, where it is, optional)
+    let mut queue: std::collections::VecDeque<(PathBuf, PathBuf, bool)> =
+        configs.iter().map(|c| (normalize(c), c.clone(), false)).collect();
+    while let Some((shown, path, optional)) = queue.pop_front() {
+        if optional && !path.exists() {
+            if !missing.contains(&shown) {
+                missing.push(shown);
+            }
+            continue;
+        }
+        let abs = fs::canonicalize(&path).with_context(|| format!("config directory {}", shown.display()))?;
+        if roots.iter().any(|r| r.abs == abs) {
+            continue;
+        }
         for file in walk(&abs)? {
             let rel = file.strip_prefix(&abs).unwrap();
             if file.extension().is_some_and(|e| e == "cfg") {
                 let text = fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
-                let dir = file.parent().unwrap().to_string_lossy().to_string();
-                sources.push((shown.join(rel).to_string_lossy().to_string(), dir, text));
+                let dir = file.parent().unwrap();
+                let before = decls.layers.len();
+                decls.add(&text, home);
+                let shown_dir = shown.join(rel).parent().unwrap().to_path_buf();
+                for (written, optional) in &decls.layers[before..] {
+                    queue.push_back((normalize(&shown_dir.join(written)), dir.join(written), *optional));
+                }
+                sources.push((shown.join(rel).to_string_lossy().to_string(), dir.to_string_lossy().to_string(), text));
             } else {
                 blobs.insert(file.to_string_lossy().to_string(), read_blob(&file)?);
             }
@@ -67,14 +127,20 @@ pub fn load(configs: &[PathBuf], optional: &[PathBuf], facts: &[(String, PathBuf
         roots.push(Root { shown, abs });
     }
     let mut db = RootDb::new(sources, blobs);
-    let mut table = BTreeMap::new();
-    for (name, path) in facts {
-        let text = fs::read_to_string(path).with_context(|| format!("facts file {}", path.display()))?;
-        table.insert(name.clone(), Arc::from(text.as_str()));
-    }
     let ws = db.ws();
-    ws.set_facts(&mut db).to(Arc::new(table));
-    Ok(Loaded { db, roots })
+    ws.set_facts(&mut db).to(Arc::new(read_facts(&decls.facts)));
+    Ok(Loaded { db, roots, missing, decls, home: home.to_path_buf() })
+}
+
+/// Fact files that don't exist are left out: `fact_table` names the path.
+fn read_facts(files: &[(String, PathBuf)]) -> BTreeMap<String, Arc<str>> {
+    let mut table = BTreeMap::new();
+    for (name, path) in files {
+        if let Ok(text) = fs::read_to_string(path) {
+            table.insert(name.clone(), Arc::from(text.as_str()));
+        }
+    }
+    table
 }
 
 pub fn read_blob(file: &Path) -> Result<(Vec<u8>, bool)> {
@@ -102,6 +168,53 @@ pub fn walk(dir: &Path) -> Result<Vec<PathBuf>> {
 }
 
 impl Loaded {
+    /// What a generation built from this config records about where it came from.
+    pub fn inputs(&self) -> Inputs {
+        let facts = self.db.ws().facts(&self.db);
+        Inputs {
+            layers: self.roots.iter().map(|r| r.abs.to_string_lossy().to_string()).collect(),
+            facts: self
+                .decls
+                .facts
+                .iter()
+                .map(|(name, _)| {
+                    let hash = facts
+                        .get(name)
+                        .map_or("missing".into(), |t| blake3::hash(t.as_bytes()).to_hex()[..32].to_string());
+                    (name.clone(), hash)
+                })
+                .collect(),
+        }
+    }
+
+    /// Whether the sources now declare other layers or fact files than at
+    /// `load`; the watcher loads afresh then.
+    pub fn decls_changed(&self) -> bool {
+        let db: &dyn Db = &self.db;
+        let mut now = Decls::default();
+        for s in db.ws().sources(db).iter().filter(|s| s.dir(db) != "<stdlib>") {
+            now.add(s.text(db), &self.home);
+        }
+        let sorted = |d: &Decls| {
+            let (mut l, mut f) = (d.layers.clone(), d.facts.clone());
+            l.sort();
+            f.sort();
+            (l, f)
+        };
+        sorted(&now) != sorted(&self.decls)
+    }
+
+    /// Re-read the fact files outside the config. Returns whether any changed.
+    pub fn refresh_facts(&mut self) -> bool {
+        let table = read_facts(&self.decls.facts);
+        let ws = self.db.ws();
+        if **ws.facts(&self.db) == table {
+            return false;
+        }
+        ws.set_facts(&mut self.db).to(Arc::new(table));
+        true
+    }
+
     /// Apply one changed path from the watcher. Returns whether anything changed.
     pub fn refresh(&mut self, path: &Path) -> Result<bool> {
         if path.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')) {
@@ -207,6 +320,12 @@ impl Loaded {
         let get = |k: &str| r.get(k).and_then(Value::as_str);
         let kind = match get("kind") {
             Some("copy") => Kind::Copy,
+            Some("merge") => {
+                let format = Format::of(target).ok_or("only a .json or .toml file merges")?;
+                let text = get("content").ok_or("`merge` needs json(...) or toml(...)")?;
+                Doc::parse(format, text.as_bytes())?;
+                Kind::Merge
+            }
             _ => Kind::Link,
         };
         let exec = get("mode") == Some("0755");

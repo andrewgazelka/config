@@ -1,10 +1,12 @@
 mod build;
 mod db;
+mod document;
 mod eval;
 mod lower;
 mod merge;
 mod render;
 mod schema;
+mod status;
 mod store;
 mod syntax;
 mod types;
@@ -15,40 +17,28 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use salsa::Setter;
 
 use crate::build::Loaded;
-use crate::db::Db;
-use crate::store::{Content, Store, Unit};
-use crate::syntax::ast::{FactSource, Stmt};
+use crate::status::{Status, unix_now};
+use crate::store::{Content, Kind, Store, SwitchReport, Unit};
 
 #[derive(Parser)]
 #[command(version, about = "Entities and components in, files out")]
 struct Cli {
-    /// Config directories; every `.cfg` under them is one config.
+    /// Config directories; every `.cfg` under them is one config. The
+    /// layers they declare (`layer "../other"`) join them.
     #[arg(long = "config", short, global = true, default_value = "config")]
     configs: Vec<PathBuf>,
-    /// More config directories, merged in when they exist and skipped when
-    /// they don't (a private checkout).
-    #[arg(long = "config-optional", global = true)]
-    optional: Vec<PathBuf>,
-    /// Override a fact table: `NAME=file.json`.
-    #[arg(long = "facts", global = true, value_parser = parse_facts)]
-    facts: Vec<(String, PathBuf)>,
     /// Where generations and the content store live.
     #[arg(long, global = true, env = "STRATA_STATE")]
     state: Option<PathBuf>,
     /// The directory `~/` means.
     #[arg(long, global = true, env = "HOME", default_value = "/")]
     home: PathBuf,
-    /// System for `nix eval` fact tables.
-    #[arg(long, global = true, env = "STRATA_SYSTEM", default_value = default_system())]
-    system: String,
     /// Flush every file to stable storage as it is written (F_FULLFSYNC on
     /// macOS). Without it, a crash is repaired on the next run instead.
     #[arg(long, global = true, env = "STRATA_DURABLE")]
@@ -72,9 +62,16 @@ enum Cmd {
         /// Move files strata doesn't own into the state dir's backups instead of refusing.
         #[arg(long)]
         adopt: bool,
+        /// A config layer the current generation has that is gone on
+        /// purpose; without it, a switch that drops a layer is refused.
+        #[arg(long = "drop-layer")]
+        drop_layer: Vec<PathBuf>,
     },
     /// Rebuild and switch on every change under the config directories.
+    /// A failed apply posts a notification and is recorded for `status`.
     Watch,
+    /// The last good generation, and the error applying is stuck on, if any.
+    Status,
     /// Show what `apply` would do, reading `~` only.
     Plan {
         #[arg(long)]
@@ -86,14 +83,14 @@ enum Cmd {
     Rollback {
         #[arg(long)]
         to: Option<String>,
+        #[arg(long = "drop-layer")]
+        drop_layer: Vec<PathBuf>,
     },
     /// Delete store objects that kept generations don't use.
     Gc {
         #[arg(long, default_value_t = 5)]
         keep: usize,
     },
-    /// Evaluate `facts ... from nix` tables and cache them by lock hash.
-    NixFacts,
     /// JSON Schemas as strata types.
     Schema {
         #[command(subcommand)]
@@ -113,20 +110,6 @@ enum SchemaCmd {
         #[arg(long)]
         out: Option<PathBuf>,
     },
-}
-
-const fn default_system() -> &'static str {
-    match (std::env::consts::ARCH.as_bytes(), std::env::consts::OS.as_bytes()) {
-        (b"aarch64", b"macos") => "aarch64-darwin",
-        (b"aarch64", _) => "aarch64-linux",
-        (_, b"macos") => "x86_64-darwin",
-        _ => "x86_64-linux",
-    }
-}
-
-fn parse_facts(s: &str) -> Result<(String, PathBuf), String> {
-    let (name, path) = s.split_once('=').ok_or("expected NAME=file.json")?;
-    Ok((name.to_string(), PathBuf::from(path)))
 }
 
 fn main() -> ExitCode {
@@ -155,52 +138,58 @@ impl Cli {
     }
 
     fn load(&self) -> Result<Loaded> {
-        let mut loaded = build::load(&self.configs, &self.optional, &self.facts)?;
-        self.load_nix_facts(&mut loaded)?;
+        let loaded = build::load(&self.configs, &self.home)?;
+        for m in &loaded.missing {
+            eprintln!("strata: optional layer {} does not exist; building without it", m.display());
+        }
         Ok(loaded)
     }
+}
 
-    fn nix_decls(&self, loaded: &Loaded) -> Vec<(String, PathBuf, PathBuf)> {
-        let db: &dyn Db = &loaded.db;
-        let mut out = Vec::new();
-        for src in db.ws().sources(db).iter() {
-            if let Ok(stmts) = db::parse(db, *src) {
-                for s in stmts {
-                    if let Stmt::Facts { name, source: FactSource::Nix { expr, lock }, .. } = s {
-                        let dir = Path::new(src.dir(db));
-                        out.push((name.name.to_string(), dir.join(expr), dir.join(lock)));
-                    }
-                }
-            }
+/// `--drop-layer` as generations record layers: absolute, symlinks resolved
+/// while the directory still exists.
+fn layer_names(dirs: &[PathBuf]) -> Result<Vec<String>> {
+    dirs.iter()
+        .map(|d| {
+            let abs = fs::canonicalize(d).or_else(|_| std::path::absolute(d).map(|a| eval::normalize(&a)))?;
+            Ok(abs.to_string_lossy().to_string())
+        })
+        .collect()
+}
+
+fn print_report(report: &SwitchReport) {
+    for c in &report.changed {
+        println!("  updated {c}");
+    }
+    for (target, d) in &report.drift {
+        println!("  drift {target} {}: the app had {}, strata's {} is back", d.path, d.app, d.strata);
+    }
+    for c in &report.removed {
+        println!("  removed {c}");
+    }
+    for c in &report.kept {
+        println!("  kept {c} (changed since strata wrote it)");
+    }
+    for c in &report.backed_up {
+        println!("  backed up the old {c}");
+    }
+}
+
+/// Record an apply's outcome for `strata status`. Returns whether the
+/// error is new since the last success.
+fn record(store: &Store, outcome: Result<&str, &str>) -> bool {
+    let mut status = Status::load(&store.state);
+    let new = match outcome {
+        Ok(generation) => {
+            status.succeeded(generation, unix_now());
+            false
         }
-        out
+        Err(e) => status.failed(e, unix_now()),
+    };
+    if let Err(e) = status.save(&store.state) {
+        eprintln!("strata: writing {}: {e:#}", Status::path(&store.state).display());
     }
-
-    fn facts_cache(&self, name: &str, expr: &Path, lock: &Path) -> Result<PathBuf> {
-        let mut h = blake3::Hasher::new();
-        h.update(&fs::read(expr).with_context(|| format!("reading {}", expr.display()))?);
-        h.update(&[0]);
-        h.update(&fs::read(lock).with_context(|| format!("reading {}", lock.display()))?);
-        h.update(&[0]);
-        h.update(self.system.as_bytes());
-        Ok(self.state().join("facts").join(format!("{name}-{}.json", &h.finalize().to_hex()[..32])))
-    }
-
-    /// Cached `nix eval` results only: evaluation never happens on the hot path.
-    fn load_nix_facts(&self, loaded: &mut Loaded) -> Result<()> {
-        let ws = loaded.db.ws();
-        let mut table = (**ws.facts(&loaded.db)).clone();
-        for (name, expr, lock) in self.nix_decls(loaded) {
-            if table.contains_key(&name) {
-                continue;
-            }
-            if let Ok(text) = fs::read_to_string(self.facts_cache(&name, &expr, &lock)?) {
-                table.insert(name, Arc::from(text.as_str()));
-            }
-        }
-        ws.set_facts(&mut loaded.db).to(Arc::new(table));
-        Ok(())
-    }
+    new
 }
 
 /// Check, then turn `files.*` into units. Errors are rendered.
@@ -222,60 +211,36 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Cmd::Build { out } => {
             let loaded = cli.load()?;
             let units = evaluate(&loaded)?;
-            let (hash, _) = cli.store().realize(&units)?;
+            let (hash, _) = cli.store().realize(&units, loaded.inputs())?;
             if let Some(out) = out {
                 write_out(out, &units)?;
             }
             println!("{hash}");
         }
-        Cmd::Apply { adopt } => {
-            let t = Instant::now();
-            let loaded = cli.load()?;
-            let units = evaluate(&loaded)?;
-            let t_eval = t.elapsed();
+        Cmd::Apply { adopt, drop_layer } => {
             let store = cli.store();
-            let (hash, generation) = store.realize(&units)?;
-            let t_realize = t.elapsed() - t_eval;
-            let stats = store.stats();
-            let report = store.switch(&hash, &generation, *adopt)?;
-            let t_switch = t.elapsed() - t_eval - t_realize;
-            for c in &report.changed {
-                println!("  updated {c}");
+            let drop = layer_names(drop_layer)?;
+            match apply(&cli, &store, *adopt, &drop) {
+                Ok(hash) => {
+                    record(&store, Ok(&hash));
+                }
+                Err(e) => {
+                    record(&store, Err(&format!("{e:#}")));
+                    return Err(e);
+                }
             }
-            for c in &report.removed {
-                println!("  removed {c}");
-            }
-            for c in &report.kept {
-                println!("  kept {c} (changed since strata wrote it)");
-            }
-            for c in &report.backed_up {
-                println!("  backed up the old {c}");
-            }
-            println!(
-                "generation {hash}: {} units, eval+render {:.1} ms, realize {:.1} ms \
-                 (verify {} {:.2} ms, {} repaired; order {} {:.2} ms), switch {:.1} ms",
-                generation.units.len(),
-                ms(t_eval),
-                ms(t_realize),
-                stats.verified,
-                ms(stats.verify),
-                stats.repaired,
-                stats.fresh,
-                ms(stats.order),
-                ms(t_switch)
-            );
         }
         Cmd::Watch => watch(&cli)?,
         Cmd::Plan { json } => {
             let loaded = cli.load()?;
             let units = evaluate(&loaded)?;
-            plan(&cli, &units, *json)?;
+            plan(&cli, &loaded, &units, *json)?;
         }
         Cmd::Explain { address } => {
             let loaded = cli.load()?;
             print!("{}", loaded.explain(address)?);
         }
-        Cmd::Rollback { to } => {
+        Cmd::Rollback { to, drop_layer } => {
             let store = cli.store();
             let history = store.history();
             let cur = store.current()?.map(|(h, _)| h);
@@ -292,36 +257,22 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 }
             };
             let generation = store.load(&target)?;
-            let report = store.switch(&target, &generation, false)?;
+            let report = store.switch(&target, &generation, false, &layer_names(drop_layer)?)?;
+            record(&store, Ok(&target));
             println!("rolled back to {target}: {} changed, {} removed", report.changed.len(), report.removed.len());
+        }
+        Cmd::Status => {
+            let store = cli.store();
+            let status = Status::load(&store.state);
+            let current = store.current()?.map(|(h, _)| h);
+            print!("{}", status.render(current.as_deref()));
+            if status.failing.is_some() {
+                return Ok(ExitCode::FAILURE);
+            }
         }
         Cmd::Gc { keep } => {
             let (n, bytes) = cli.store().gc(*keep)?;
             println!("deleted {n} objects, {bytes} bytes");
-        }
-        Cmd::NixFacts => {
-            let loaded = build::load(&cli.configs, &cli.optional, &[])?;
-            for (name, expr, lock) in cli.nix_decls(&loaded) {
-                let cache = cli.facts_cache(&name, &expr, &lock)?;
-                let t = Instant::now();
-                // `--file` doesn't auto-call a function, so call it in an --expr.
-                let q = |s: &str| serde_json::to_string(s).expect("a string serializes");
-                let call = format!("import {} {{ system = {}; }}", q(&expr.to_string_lossy()), q(&cli.system));
-                let out = std::process::Command::new("nix")
-                    .args(["eval", "--json", "--impure", "--expr", &call])
-                    .output()
-                    .context("running nix eval")?;
-                if !out.status.success() {
-                    bail!(
-                        "nix eval {} failed ({}):\n{}",
-                        expr.display(),
-                        out.status,
-                        String::from_utf8_lossy(&out.stderr)
-                    );
-                }
-                store::write_atomic(&cache, &out.stdout, 0o644, true)?;
-                println!("{name}: {} in {:.1} s -> {}", cli.system, t.elapsed().as_secs_f64(), cache.display());
-            }
         }
         Cmd::Schema { cmd: SchemaCmd::Import { source, name, out } } => {
             let bytes = if source.starts_with("https://") || source.starts_with("http://") {
@@ -348,6 +299,35 @@ fn run(cli: Cli) -> Result<ExitCode> {
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+fn apply(cli: &Cli, store: &Store, adopt: bool, drop: &[String]) -> Result<String> {
+    let t = Instant::now();
+    let loaded = cli.load()?;
+    let units = evaluate(&loaded)?;
+    let t_eval = t.elapsed();
+    let (hash, generation) = store.realize(&units, loaded.inputs())?;
+    let t_realize = t.elapsed() - t_eval;
+    let stats = store.stats();
+    let report = store.switch(&hash, &generation, adopt, drop)?;
+    let t_switch = t.elapsed() - t_eval - t_realize;
+    print_report(&report);
+    println!(
+        "generation {hash}: {} units from {} layer{}, eval+render {:.1} ms, realize {:.1} ms \
+         (verify {} {:.2} ms, {} repaired; order {} {:.2} ms), switch {:.1} ms",
+        generation.units.len(),
+        generation.inputs.layers.len(),
+        if generation.inputs.layers.len() == 1 { "" } else { "s" },
+        ms(t_eval),
+        ms(t_realize),
+        stats.verified,
+        ms(stats.verify),
+        stats.repaired,
+        stats.fresh,
+        ms(stats.order),
+        ms(t_switch)
+    );
+    Ok(hash)
 }
 
 fn ms(d: Duration) -> f64 {
@@ -383,23 +363,73 @@ fn write_out(out: &Path, units: &[Unit]) -> Result<()> {
 
 fn watch(cli: &Cli) -> Result<()> {
     use notify::{RecursiveMode, Watcher};
-    let mut loaded = cli.load()?;
     let store = cli.store();
     let (tx, rx) = std::sync::mpsc::channel();
     let mut watcher = notify::recommended_watcher(move |res| {
         let _ = tx.send(res);
     })?;
-    for r in &loaded.roots {
-        watcher.watch(&r.abs, RecursiveMode::Recursive)?;
-    }
     let stdout = std::io::stdout();
-    let report = |line: serde_json::Value| {
+    let report = |line: &serde_json::Value| {
         let mut out = stdout.lock();
         let _ = writeln!(out, "{line}");
         let _ = out.flush();
     };
-    report(rebuild(&loaded, &store, Instant::now(), 0));
+    // Every failure goes to the log, the status file and, the first time
+    // it is seen since the last success, a notification.
+    let fail = |seq: u64, generation: Option<&str>, error: String| {
+        report(&serde_json::json!({ "seq": seq, "generation": generation, "error": error }));
+        if record(&store, Err(&error)) {
+            status::notify(&error);
+        }
+    };
+    let mut watched: Vec<PathBuf> = Vec::new();
+    let mut watch_all = |watcher: &mut notify::RecommendedWatcher, loaded: &Loaded| -> Result<()> {
+        for p in watched.drain(..) {
+            let _ = watcher.unwatch(&p);
+        }
+        for r in &loaded.roots {
+            watcher.watch(&r.abs, RecursiveMode::Recursive)?;
+            watched.push(r.abs.clone());
+        }
+        // A fact file outside the config is replaced, not edited (home-manager
+        // relinks it), so its directory is what reports the change.
+        for (_, f) in &loaded.decls.facts {
+            if let Some(dir) = f.parent().filter(|d| d.is_dir())
+                && !watched.iter().any(|w| w == dir)
+            {
+                watcher.watch(dir, RecursiveMode::NonRecursive)?;
+                watched.push(dir.to_path_buf());
+            }
+        }
+        Ok(())
+    };
+    // A config that doesn't load is retried on any change to it, or after a minute.
+    let mut loaded = loop {
+        match cli.load() {
+            Ok(l) => break l,
+            Err(e) => {
+                fail(0, None, format!("{e:#}"));
+                for c in &cli.configs {
+                    let _ = watcher.watch(c, RecursiveMode::Recursive);
+                }
+                let _ = rx.recv_timeout(Duration::from_secs(60));
+                while rx.try_recv().is_ok() {}
+            }
+        }
+    };
+    for c in &cli.configs {
+        let _ = watcher.unwatch(c);
+    }
+    watch_all(&mut watcher, &loaded)?;
     let mut seq = 0u64;
+    let done = |seq: u64, loaded: &Loaded, t0: Instant| match rebuild(loaded, &store, t0, seq) {
+        Ok((hash, line)) => {
+            report(&line);
+            record(&store, Ok(&hash));
+        }
+        Err((hash, e)) => fail(seq, hash.as_deref(), e),
+    };
+    done(seq, &loaded, Instant::now());
     loop {
         let first = rx.recv()?;
         let t0 = Instant::now();
@@ -433,61 +463,98 @@ fn watch(cli: &Cli) -> Result<()> {
         let mut paths = files;
         paths.sort();
         paths.dedup();
-        let mut changed = false;
+        let mut changed = loaded.refresh_facts();
         for p in &paths {
             match loaded.refresh(p) {
                 Ok(c) => changed |= c,
-                Err(e) => report(serde_json::json!({ "error": format!("{e:#}") })),
+                Err(e) => report(&serde_json::json!({ "error": format!("{e:#}") })),
             }
         }
-        if changed {
-            seq += 1;
-            report(rebuild(&loaded, &store, t0, seq));
+        if !changed {
+            continue;
         }
+        seq += 1;
+        if loaded.decls_changed() {
+            // A layer or fact file came or went: build the config afresh.
+            match cli.load() {
+                Ok(l) => {
+                    loaded = l;
+                    watch_all(&mut watcher, &loaded)?;
+                }
+                Err(e) => {
+                    fail(seq, None, format!("{e:#}"));
+                    continue;
+                }
+            }
+        }
+        done(seq, &loaded, t0);
     }
 }
 
-fn rebuild(loaded: &Loaded, store: &Store, t0: Instant, seq: u64) -> serde_json::Value {
+/// One build and switch: the generation and its log line, or the
+/// generation (if it got that far) and the error.
+fn rebuild(
+    loaded: &Loaded,
+    store: &Store,
+    t0: Instant,
+    seq: u64,
+) -> Result<(String, serde_json::Value), (Option<String>, String)> {
     let t = Instant::now();
-    let units = match evaluate(loaded) {
-        Ok(u) => u,
-        Err(e) => return serde_json::json!({ "seq": seq, "error": format!("{e:#}") }),
-    };
+    let units = evaluate(loaded).map_err(|e| (None, format!("{e:#}")))?;
     let t_eval = t.elapsed();
-    let realized = store.realize(&units);
+    let (hash, generation) = store.realize(&units, loaded.inputs()).map_err(|e| (None, format!("{e:#}")))?;
     let t_realize = t.elapsed() - t_eval;
-    let (hash, generation) = match realized {
-        Ok(r) => r,
-        Err(e) => return serde_json::json!({ "seq": seq, "error": format!("{e:#}") }),
-    };
     let stats = store.stats();
-    let switched = store.switch(&hash, &generation, false);
+    let r = store.switch(&hash, &generation, false, &[]).map_err(|e| (Some(hash.clone()), format!("{e:#}")))?;
     let t_switch = t.elapsed() - t_eval - t_realize;
-    match switched {
-        Ok(r) => serde_json::json!({
-            "seq": seq,
-            "generation": hash,
-            "changed": r.changed,
-            "removed": r.removed,
-            "eval_ms": ms(t_eval),
-            "realize_ms": ms(t_realize),
-            "verify_ms": ms(stats.verify),
-            "verified": stats.verified,
-            "repaired": stats.repaired,
-            "order_ms": ms(stats.order),
-            "switch_ms": ms(t_switch),
-            "total_ms": ms(t0.elapsed()),
-        }),
-        Err(e) => serde_json::json!({ "seq": seq, "generation": hash, "error": format!("{e:#}") }),
-    }
+    let drift: Vec<_> = r
+        .drift
+        .iter()
+        .map(|(target, d)| serde_json::json!({ "target": target, "key": d.path, "app": d.app, "strata": d.strata }))
+        .collect();
+    let line = serde_json::json!({
+        "seq": seq,
+        "generation": hash,
+        "changed": r.changed,
+        "removed": r.removed,
+        "drift": drift,
+        "eval_ms": ms(t_eval),
+        "realize_ms": ms(t_realize),
+        "verify_ms": ms(stats.verify),
+        "verified": stats.verified,
+        "repaired": stats.repaired,
+        "order_ms": ms(stats.order),
+        "switch_ms": ms(t_switch),
+        "total_ms": ms(t0.elapsed()),
+    });
+    Ok((hash, line))
 }
 
 /// Read-only: what is at each target now and whether strata's bytes match.
-fn plan(cli: &Cli, units: &[Unit], json: bool) -> Result<()> {
+fn plan(cli: &Cli, loaded: &Loaded, units: &[Unit], json: bool) -> Result<()> {
     let store = cli.store();
     let prev = store.current().ok().flatten().map(|(_, g)| g).unwrap_or_default();
+    let layers = loaded.inputs().layers;
+    let dropped: Vec<&String> = prev.inputs.layers.iter().filter(|l| !layers.contains(l)).collect();
     let mut rows = Vec::new();
     for u in units {
+        if u.kind == Kind::Merge {
+            let Content::File { bytes, .. } = &u.content else { continue };
+            let (action, drift) = match store.merge_bytes(&u.target, bytes, prev.units.get(&u.target), false) {
+                Ok((false, _)) => ("none".to_string(), vec![]),
+                Ok((true, drift)) => ("merge strata's keys in".to_string(), drift),
+                Err(e) => (format!("refuse: {e:#}"), vec![]),
+            };
+            rows.push(serde_json::json!({
+                "target": u.target,
+                "now": if store.target(&u.target)?.exists() { "file" } else { "missing" },
+                "content_equal": action == "none",
+                "kind": u.kind,
+                "action": action,
+                "drift": drift,
+            }));
+            continue;
+        }
         let path = store.target(&u.target)?;
         let now = match fs::symlink_metadata(&path) {
             Err(_) => "missing".to_string(),
@@ -513,6 +580,9 @@ fn plan(cli: &Cli, units: &[Unit], json: bool) -> Result<()> {
             "action": action,
         }));
     }
+    for l in &dropped {
+        eprintln!("apply would refuse: the current generation has layer {l} and this config does not");
+    }
     if json {
         println!("{}", serde_json::to_string_pretty(&rows)?);
         return Ok(());
@@ -526,6 +596,14 @@ fn plan(cli: &Cli, units: &[Unit], json: bool) -> Result<()> {
             r["action"].as_str().unwrap(),
             r["kind"].as_str().unwrap(),
         );
+        for d in r["drift"].as_array().into_iter().flatten() {
+            println!(
+                "    drift {}: the app has {}, strata's {} wins",
+                d["path"].as_str().unwrap(),
+                d["app"],
+                d["strata"]
+            );
+        }
     }
     Ok(())
 }

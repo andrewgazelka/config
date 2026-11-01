@@ -28,15 +28,22 @@ By hand, from the repo root:
 ```sh
 strata plan        # what apply would change, reading ~ only
 strata apply
+strata status      # the last good generation, and what the agent is stuck on
 strata rollback    # back to the previous generation
 strata explain 'zed.font[size]'
 ```
 
+When the agent can't apply, it posts a notification once per distinct
+error and records it for `strata status`.
+
 The checkout is expected at `/Volumes/Projects/nix` (`repo` in
 `home/strata.nix`; `config/cursor.cfg` names it for nixd). A private repo
-at `private/` (gitignored) adds its strata files from `private/config/`:
-`--config` is repeatable, `--config-optional` names a dir that is skipped
-when absent, and all dirs merge as one config.
+at `private/` (gitignored) adds its strata files from `private/config/`.
+`config/strata.cfg` declares it (`layer optional "../private/config"`), so a
+hand run and the agent build the same generation, and all dirs merge as one
+config. Each generation records its layers; a switch that would drop one
+the current generation has is refused, naming the files it would remove,
+unless `--drop-layer <dir>` says it is gone on purpose.
 
 Another flake can build on this one: `darwinModules.default` is the whole
 system (home-manager included), so `darwinSystem { modules = [
@@ -96,13 +103,16 @@ a file or tree from `config/`, or a link to a Nix store path. Values merge by
 level, and two different values at one level are an error naming both. Each
 file is stored by its blake3 hash under `~/.local/state/strata`, a generation
 is the set of files, named by one hash, and `apply` switches `~` to it with
-one rename per file: a symlink into the store, or a copy for apps that
-rewrite their own settings (Zed, Cursor, Claude Code). Evaluation is
+one rename per file: a symlink into the store, or a copy. Settings an app
+also writes (Zed, Cursor, Claude Code) are `merge(json(...))`: strata owns
+the keys it declares and merges them into the file on disk, the app's keys
+stay, and an app's change to one of strata's keys is reported as drift and
+set back. Evaluation is
 incremental, so a save re-renders only what it touches.
 
-Store paths (delta, gh, ...) come from `config/nix/facts.nix`, evaluated
-against the nixpkgs in `flake.lock`. The agent gets the system's table;
-`strata nix-facts` caches one for running strata by hand.
+Store paths (delta, gh, ...) come from `config/nix/facts.nix`, built from
+the system's nixpkgs by `home/strata.nix` into
+`~/.config/strata/facts/pkgs.json`, which `config/strata.cfg` reads.
 
 The golden tests (`strata/tests/golden`) compare against output recorded
 from the Nickel config strata replaced. The crash test kills `apply` at each
@@ -114,8 +124,7 @@ converges. `cargo bench --bench latency` times cold runs and edits.
 Coming from a home-manager that wrote these dotfiles itself:
 
 ```sh
-nix run .#strata -- nix-facts
-nix run .#strata -- apply --adopt   # old files go to ~/.local/state/strata/backups
-darwin-rebuild switch --flake .
-nix run .#strata -- plan            # every target: none
+darwin-rebuild switch --flake .    # writes the pkgs fact table, starts the agent
+strata apply --adopt               # old files go to ~/.local/state/strata/backups
+strata plan                        # every target: none
 ```

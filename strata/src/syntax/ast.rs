@@ -89,6 +89,13 @@ pub enum Stmt {
         ty: TypeExpr,
         span: Span,
     },
+    /// `layer "../other"`: another config directory this one is built with.
+    /// `layer optional "../private/config"` is skipped when it doesn't exist.
+    Layer {
+        dir: String,
+        optional: bool,
+        span: Span,
+    },
     /// `facts pkgs: store-path from "facts.json"`: a JSON object as entities.
     Facts {
         name: Ident,
@@ -107,13 +114,10 @@ pub enum Stmt {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum FactSource {
+    /// A JSON file: relative paths are next to the source; `~/...` and
+    /// absolute paths are outside the config (written by the system, e.g.
+    /// home-manager), read once when the config loads.
     Json(String),
-    /// A Nix expression evaluated with `nix eval --json`, cached by the
-    /// hash of the lock file and the expression.
-    Nix {
-        expr: String,
-        lock: String,
-    },
 }
 
 #[derive(Clone, Debug, PartialEq)]

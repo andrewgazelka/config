@@ -1,21 +1,7 @@
-# Store paths the config links to, for one system. `strata nix-facts` passes
-# only the system, and nixpkgs comes from the repo's flake.lock;
-# home/strata.nix also passes the system's own pkgs.
-{
-  system,
-  pkgs ?
-    let
-      lock = (builtins.fromJSON (builtins.readFile ../../flake.lock)).nodes.nixpkgs.locked;
-      nixpkgs = builtins.fetchTarball {
-        url = "https://github.com/${lock.owner}/${lock.repo}/archive/${lock.rev}.tar.gz";
-        sha256 = lock.narHash;
-      };
-    in
-    import nixpkgs {
-      inherit system;
-      config.allowUnfree = true;
-    },
-}:
+# Store paths the config links to, for one system's nixpkgs. home/strata.nix
+# writes the table to ~/.config/strata/facts/pkgs.json (config/strata.cfg
+# reads it there), which keeps the paths alive with the system.
+{ pkgs, ... }:
 let
   # Prompt, jump and history hooks for nushell, generated from the binaries.
   vendor =

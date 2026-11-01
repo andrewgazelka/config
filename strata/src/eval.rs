@@ -682,6 +682,19 @@ impl<'a> Eval<'a> {
                     v => fail(args[0].span, format!("`copy` needs a file, found {}", v.kind())),
                 }
             }
+            "merge" => {
+                // A JSON or TOML file the app writes too: strata's keys are
+                // merged into the file on disk and the app's stay.
+                arity(1)?;
+                match self.value(&args[0], env)? {
+                    Value::Record(map) if map.contains_key("content") => {
+                        let mut map = (*map).clone();
+                        map.insert("kind".into(), Value::str("merge"));
+                        Ok(Value::record(map))
+                    }
+                    v => fail(args[0].span, format!("`merge` needs json(...) or toml(...), found {v}")),
+                }
+            }
             "link" => {
                 // A link to an absolute path, e.g. a Nix store path.
                 arity(1)?;

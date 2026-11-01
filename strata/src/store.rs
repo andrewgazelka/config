@@ -30,11 +30,16 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::document::{Doc, Drift, Format};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
     Copy,
     Link,
+    /// A JSON or TOML file the app writes too: strata owns the keys it
+    /// declares and merges them into the file on disk (see `merge`).
+    Merge,
 }
 
 #[derive(Clone, Debug)]
@@ -71,10 +76,59 @@ pub struct Entry {
     pub exec: bool,
 }
 
+/// What a generation was built from.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Inputs {
+    /// Every config directory, absolute.
+    #[serde(default)]
+    pub layers: Vec<String>,
+    /// Fact tables read from outside the config: name -> blake3 of the
+    /// table, or `missing`.
+    #[serde(default)]
+    pub facts: BTreeMap<String, String>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Generation {
+    #[serde(flatten)]
+    pub inputs: Inputs,
     pub units: BTreeMap<String, Entry>,
 }
+
+/// A switch that would leave out a config layer the current generation
+/// was built from, and so remove or change the files that layer makes.
+#[derive(Debug)]
+pub struct DropsLayer {
+    pub layers: Vec<String>,
+    /// Targets the switch would remove.
+    pub removes: Vec<String>,
+}
+
+impl std::fmt::Display for DropsLayer {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let s = if self.layers.len() == 1 { "" } else { "s" };
+        writeln!(f, "refusing to switch: the current generation was built with config layer{s} this one lacks:")?;
+        for l in &self.layers {
+            writeln!(f, "  {l}")?;
+        }
+        if self.removes.is_empty() {
+            writeln!(f, "it would remove no files, but every value the layer sets would go")?;
+        } else {
+            writeln!(
+                f,
+                "it would remove {} file{}:",
+                self.removes.len(),
+                if self.removes.len() == 1 { "" } else { "s" }
+            )?;
+            for r in &self.removes {
+                writeln!(f, "  {r}")?;
+            }
+        }
+        write!(f, "if the layer is gone on purpose, pass --drop-layer <dir> naming it")
+    }
+}
+
+impl std::error::Error for DropsLayer {}
 
 impl Generation {
     pub fn hash(&self) -> String {
@@ -145,14 +199,17 @@ impl Store {
     /// An object already on disk is read back and rewritten if its bytes
     /// are not the ones its name promises (a crash can leave it short or
     /// zeroed). Then one ordering point for everything written.
-    pub fn realize(&self, units: &[Unit]) -> Result<(String, Generation)> {
+    pub fn realize(&self, units: &[Unit], inputs: Inputs) -> Result<(String, Generation)> {
         fs::create_dir_all(self.objects())?;
         fs::create_dir_all(self.state.join("generations"))?;
         let mut w = Writes::default();
-        let mut generation = Generation::default();
+        let mut generation = Generation { inputs, units: BTreeMap::new() };
         for u in units {
             let (object, exec) = match &u.content {
                 Content::File { bytes, exec } => (self.put_blob(bytes, *exec, &mut w)?, *exec),
+                Content::Tree { .. } | Content::External { .. } if u.kind == Kind::Merge => {
+                    bail!("{}: only a JSON or TOML file merges", u.target)
+                }
                 Content::Tree { entries } => (self.put_tree(entries, &mut w)?, false),
                 Content::External { path } => {
                     if u.kind == Kind::Copy {
@@ -353,6 +410,13 @@ impl Store {
                 let to = fs::read_link(&path)?;
                 if entry.kind == Kind::Link && to == want { State::Matches } else { State::Symlink(to) }
             }
+            Ok(m) if m.is_file() && entry.kind == Kind::Merge => {
+                if self.merge_into(target, entry, None, false).is_ok_and(|(changed, _)| !changed) {
+                    State::Matches
+                } else {
+                    State::File
+                }
+            }
             Ok(m) if m.is_file() => {
                 let object = self.object_path(&entry.object);
                 if entry.kind == Kind::Copy && !entry.object.ends_with(".d") && same_file_content(&path, &object)? {
@@ -365,14 +429,43 @@ impl Store {
         })
     }
 
-    /// Phase 2. `adopt` backs up foreign files instead of refusing.
-    pub fn switch(&self, hash: &str, next: &Generation, adopt: bool) -> Result<SwitchReport> {
-        self.check_objects(next)?;
+    /// Phase 2. `adopt` backs up foreign files instead of refusing. A
+    /// config layer the current generation had and `next` lacks is refused
+    /// (`DropsLayer`) unless `drop` names it.
+    pub fn switch(&self, hash: &str, next: &Generation, adopt: bool, drop: &[String]) -> Result<SwitchReport> {
         let prev = self.current()?.map(|(_, g)| g).unwrap_or_default();
+        let dropped: Vec<String> = prev
+            .inputs
+            .layers
+            .iter()
+            .filter(|l| !next.inputs.layers.contains(l) && !drop.contains(l))
+            .cloned()
+            .collect();
+        if !dropped.is_empty() {
+            let removes = prev.units.keys().filter(|t| !next.units.contains_key(*t)).cloned().collect();
+            return Err(DropsLayer { layers: dropped, removes }.into());
+        }
+        self.check_objects(next)?;
         let mut report = SwitchReport::default();
         let mut todo = Vec::new();
         for (target, entry) in &next.units {
             let state = self.observe(target, entry)?;
+            if entry.kind == Kind::Merge {
+                // The app's file is welcome: only what isn't a document strata
+                // can merge into is refused.
+                let bad = match &state {
+                    State::Missing | State::Matches => None,
+                    State::File => self.merge_into(target, entry, None, false).err().map(|e| format!("{e:#}")),
+                    s if self.owned(target, s) => None,
+                    s => Some(format!("{} (not made by strata)", s.describe())),
+                };
+                match bad {
+                    None => todo.push((target, entry, false)),
+                    Some(_) if adopt => todo.push((target, entry, true)),
+                    Some(why) => report.refused.push(format!("{target}: {why}")),
+                }
+                continue;
+            }
             let owned = self.owned(target, &state) || self.matches(&prev, target);
             match state {
                 State::Matches => {}
@@ -403,6 +496,14 @@ impl Store {
                 self.back_up(hash, target)?;
                 report.backed_up.push(target.clone());
             }
+            if entry.kind == Kind::Merge {
+                let (changed, drift) = self.merge_into(target, entry, prev.units.get(target), true)?;
+                if changed {
+                    report.changed.push(target.clone());
+                }
+                report.drift.extend(drift.into_iter().map(|d| (target.clone(), d)));
+                continue;
+            }
             self.swap(target, entry)?;
             report.changed.push(target.clone());
             if crash_armed() {
@@ -411,6 +512,15 @@ impl Store {
         }
         for (target, old) in &prev.units {
             if next.units.contains_key(target) {
+                continue;
+            }
+            if old.kind == Kind::Merge {
+                // The file stays the app's; only strata's keys leave it.
+                if self.unmerge(target, old)? {
+                    report.removed.push(target.clone());
+                } else {
+                    report.kept.push(target.clone());
+                }
                 continue;
             }
             if self.observe(target, old)? == State::Matches {
@@ -553,31 +663,120 @@ impl Store {
     }
 
     fn swap(&self, target: &str, entry: &Entry) -> Result<()> {
+        match entry.kind {
+            Kind::Link => {
+                let tmp = self.swap_tmp(target)?;
+                symlink(self.object_path(&entry.object), &tmp)?;
+                self.swap_in(target, &tmp)
+            }
+            Kind::Copy if entry.object.ends_with(".d") => bail!("{target}: trees are linked, not copied"),
+            Kind::Copy => self.put_copy(target, &fs::read(self.object_path(&entry.object))?, entry.exec),
+            Kind::Merge => bail!("{target}: a merged file is merged, not swapped"),
+        }
+    }
+
+    fn swap_tmp(&self, target: &str) -> Result<PathBuf> {
         let path = self.target(target)?;
         let parent = path.parent().unwrap();
         fs::create_dir_all(parent)?;
         let tmp = parent.join(format!(".{}.strata-tmp", path.file_name().unwrap().to_string_lossy()));
         let _ = fs::remove_file(&tmp);
-        match entry.kind {
-            Kind::Link => symlink(self.object_path(&entry.object), &tmp)?,
-            Kind::Copy if entry.object.ends_with(".d") => bail!("{target}: trees are linked, not copied"),
-            Kind::Copy => {
-                let bytes = fs::read(self.object_path(&entry.object))?;
-                let mut f = fs::File::create(&tmp)?;
-                f.write_all(&bytes)?;
-                f.set_permissions(fs::Permissions::from_mode(if entry.exec { 0o755 } else { 0o644 }))?;
-                // Without --durable a crash can leave this short or zeroed;
-                // the next run rewrites it (`torn_copy` keeps it strata's).
-                if self.durable {
-                    f.sync_all()?;
-                }
-            }
-        }
+        Ok(tmp)
+    }
+
+    fn swap_in(&self, target: &str, tmp: &Path) -> Result<()> {
+        let path = self.target(target)?;
         if fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) {
             bail!("{target}: a directory is in the way");
         }
-        fs::rename(&tmp, &path).with_context(|| format!("swapping in {}", path.display()))?;
+        fs::rename(tmp, &path).with_context(|| format!("swapping in {}", path.display()))?;
         Ok(())
+    }
+
+    fn put_copy(&self, target: &str, bytes: &[u8], exec: bool) -> Result<()> {
+        let tmp = self.swap_tmp(target)?;
+        let mut f = fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.set_permissions(fs::Permissions::from_mode(if exec { 0o755 } else { 0o644 }))?;
+        // Without --durable a crash can leave this short or zeroed;
+        // the next run rewrites it (`torn_copy` keeps it strata's).
+        if self.durable {
+            f.sync_all()?;
+        }
+        self.swap_in(target, &tmp)
+    }
+
+    fn doc_of(&self, target: &str, entry: &Entry) -> Result<Doc> {
+        let format = Format::of(target).with_context(|| format!("{target}: only .json and .toml files merge"))?;
+        let bytes = fs::read(self.object_path(&entry.object))?;
+        Doc::parse(format, &bytes).map_err(|e| anyhow!("{target}: strata's keys: {e}"))
+    }
+
+    /// Merge a `Kind::Merge` unit's keys into the file at its target (a
+    /// link into the store is read through and replaced by a file). `prev`
+    /// is the generation before's entry for the target: keys it declared
+    /// that `entry` does not leave the file. Returns whether the file
+    /// changed (or, without `write`, would) and the drift.
+    pub fn merge_into(
+        &self,
+        target: &str,
+        entry: &Entry,
+        prev: Option<&Entry>,
+        write: bool,
+    ) -> Result<(bool, Vec<Drift>)> {
+        let want = fs::read(self.object_path(&entry.object))?;
+        self.merge_bytes(target, &want, prev, write)
+    }
+
+    /// `merge_into` with strata's keys as bytes, for `plan`, which has no store objects.
+    pub fn merge_bytes(
+        &self,
+        target: &str,
+        want: &[u8],
+        prev: Option<&Entry>,
+        write: bool,
+    ) -> Result<(bool, Vec<Drift>)> {
+        let format = Format::of(target).with_context(|| format!("{target}: only .json and .toml files merge"))?;
+        let want = Doc::parse(format, want).map_err(|e| anyhow!("{target}: strata's keys: {e}"))?;
+        // A copy or link strata made before is what it declared then.
+        let prev = prev
+            .filter(|e| !e.object.starts_with('/') && !e.object.ends_with(".d"))
+            .and_then(|e| fs::read(self.object_path(&e.object)).ok())
+            .and_then(|b| Doc::parse(format, &b).ok());
+        let path = self.target(target)?;
+        let is_file = fs::symlink_metadata(&path).is_ok_and(|m| m.is_file());
+        let disk = match fs::read(&path) {
+            Ok(b) => Some(Doc::parse(format, &b).map_err(|e| anyhow!("{e}; fix it or pass --adopt"))?),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(e) => return Err(anyhow!(e).context(format!("reading {}", path.display()))),
+        };
+        let mut doc = disk.clone().unwrap_or_else(|| Doc::empty(format));
+        let drift = doc.merge(&want, prev.as_ref());
+        if is_file && disk.as_ref() == Some(&doc) {
+            return Ok((false, drift));
+        }
+        if write {
+            self.put_copy(target, &doc.render(), false)?;
+        }
+        Ok((true, drift))
+    }
+
+    /// Take a dropped `Kind::Merge` unit's keys out of the file at its
+    /// target, deleting the file if nothing is left. False when the file
+    /// is not a document strata can read (it is kept as it is).
+    fn unmerge(&self, target: &str, old: &Entry) -> Result<bool> {
+        let Ok(prev) = self.doc_of(target, old) else { return Ok(false) };
+        let format = Format::of(target).expect("doc_of checked");
+        let path = self.target(target)?;
+        let Ok(bytes) = fs::read(&path) else { return Ok(true) };
+        let Ok(mut doc) = Doc::parse(format, &bytes) else { return Ok(false) };
+        doc.unmerge(&prev);
+        if doc.is_empty() {
+            fs::remove_file(&path)?;
+        } else {
+            self.put_copy(target, &doc.render(), false)?;
+        }
+        Ok(true)
     }
 
     /// Delete store objects no kept generation references.
@@ -662,6 +861,9 @@ pub struct SwitchReport {
     pub kept: Vec<String>,
     pub backed_up: Vec<String>,
     pub refused: Vec<String>,
+    /// (target, key) where the app had changed a key strata declares;
+    /// strata's value is back.
+    pub drift: Vec<(String, Drift)>,
 }
 
 /// What one `realize` wrote and checked.
@@ -865,8 +1067,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::new(dir.path().join("state"), dir.path().join("home"), false);
         let text = "x".repeat(10_000) + "\n";
-        let (hash, g) = store.realize(&[copy("~/a.json", &text)]).unwrap();
-        store.switch(&hash, &g, false).unwrap();
+        let (hash, g) = store.realize(&[copy("~/a.json", &text)], Inputs::default()).unwrap();
+        store.switch(&hash, &g, false, &[]).unwrap();
         let path = store.target("~/a.json").unwrap();
         let mut zeroed = text.clone().into_bytes();
         zeroed[4096..8192].fill(0);
@@ -887,8 +1089,125 @@ mod tests {
         // apply converges from a torn copy without --adopt, even after the
         // config moved on to a new generation.
         fs::write(&path, &text.as_bytes()[..100]).unwrap();
-        let (hash, g) = store.realize(&[copy("~/a.json", "new\n")]).unwrap();
-        store.switch(&hash, &g, false).unwrap();
+        let (hash, g) = store.realize(&[copy("~/a.json", "new\n")], Inputs::default()).unwrap();
+        store.switch(&hash, &g, false, &[]).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "new\n");
+    }
+
+    fn unit(target: &str, kind: Kind, text: &str) -> Unit {
+        Unit { target: target.into(), kind, content: Content::File { bytes: text.as_bytes().into(), exec: false } }
+    }
+
+    fn layers(dirs: &[&str]) -> Inputs {
+        Inputs { layers: dirs.iter().map(|d| d.to_string()).collect(), facts: BTreeMap::new() }
+    }
+
+    /// A build that lost a layer (an optional directory missing, or a
+    /// caller that never named it) would delete every file the layer
+    /// makes. The switch refuses, naming the layer and those files, until
+    /// a flag says the layer is gone on purpose.
+    #[test]
+    fn a_switch_that_would_drop_a_config_layer_is_refused_and_names_the_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("state"), dir.path().join("home"), false);
+        let public = unit("~/.gitconfig", Kind::Link, "[user]\n");
+        let private = unit("~/.npmrc", Kind::Link, "token\n");
+        let (hash, g) = store.realize(&[public.clone(), private], layers(&["/c/config", "/c/private/config"])).unwrap();
+        store.switch(&hash, &g, false, &[]).unwrap();
+
+        let (hash, g) = store.realize(std::slice::from_ref(&public), layers(&["/c/config"])).unwrap();
+        let err = store.switch(&hash, &g, false, &[]).unwrap_err();
+        let drop = err.downcast_ref::<DropsLayer>().expect("a typed refusal");
+        assert_eq!(drop.layers, ["/c/private/config"]);
+        assert_eq!(drop.removes, ["~/.npmrc"]);
+        assert!(err.to_string().contains("/c/private/config") && err.to_string().contains("~/.npmrc"), "{err}");
+        assert!(store.target("~/.npmrc").unwrap().exists(), "nothing was removed");
+
+        let report = store.switch(&hash, &g, false, &["/c/private/config".into()]).unwrap();
+        assert_eq!(report.removed, ["~/.npmrc"]);
+    }
+
+    fn settings(store: &Store) -> serde_json::Value {
+        serde_json::from_slice(&fs::read(store.target("~/.claude/settings.json").unwrap()).unwrap()).unwrap()
+    }
+
+    /// Claude Code adds its own keys to settings.json; an apply keeps them.
+    #[test]
+    fn an_app_s_added_key_survives_an_apply() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("state"), dir.path().join("home"), false);
+        let ours = r#"{ "model": "opus", "permissions": { "allow": ["Read"] } }"#;
+        let (hash, g) =
+            store.realize(&[unit("~/.claude/settings.json", Kind::Merge, ours)], Inputs::default()).unwrap();
+        store.switch(&hash, &g, false, &[]).unwrap();
+        let path = store.target("~/.claude/settings.json").unwrap();
+        fs::write(&path, r#"{ "model": "opus", "permissions": { "allow": ["Read"], "additionalDirectories": ["/x"] }, "feedbackSurveyState": { "n": 1 } }"#).unwrap();
+
+        // The config moves on too: a key changes, one goes away, one is new.
+        let ours = r#"{ "model": "opus", "permissions": { "allow": ["Read", "Grep"] }, "theme": "auto" }"#;
+        let (hash, g) =
+            store.realize(&[unit("~/.claude/settings.json", Kind::Merge, ours)], Inputs::default()).unwrap();
+        let report = store.switch(&hash, &g, false, &[]).unwrap();
+        assert!(report.drift.is_empty(), "{:?}", report.drift);
+        assert_eq!(
+            settings(&store),
+            serde_json::json!({
+                "model": "opus",
+                "permissions": { "allow": ["Read", "Grep"], "additionalDirectories": ["/x"] },
+                "feedbackSurveyState": { "n": 1 },
+                "theme": "auto",
+            })
+        );
+
+        // Dropping the unit takes strata's keys out and leaves the app's.
+        let (hash, g) = store.realize(&[], Inputs::default()).unwrap();
+        store.switch(&hash, &g, false, &[]).unwrap();
+        assert_eq!(
+            settings(&store),
+            serde_json::json!({ "permissions": { "additionalDirectories": ["/x"] }, "feedbackSurveyState": { "n": 1 } })
+        );
+    }
+
+    /// `/model sonnet` rewrites a key strata declares: the next apply
+    /// reports both values and puts strata's back.
+    #[test]
+    fn an_app_s_change_to_a_strata_key_is_reported_as_drift_and_reset() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("state"), dir.path().join("home"), false);
+        let ours = r#"{ "model": "opus", "env": { "A": "1" } }"#;
+        let (hash, g) =
+            store.realize(&[unit("~/.claude/settings.json", Kind::Merge, ours)], Inputs::default()).unwrap();
+        store.switch(&hash, &g, false, &[]).unwrap();
+        let path = store.target("~/.claude/settings.json").unwrap();
+        fs::write(&path, r#"{ "model": "sonnet", "env": { "A": "1", "B": "2" } }"#).unwrap();
+
+        assert_eq!(store.observe("~/.claude/settings.json", &g.units["~/.claude/settings.json"]).unwrap(), State::File);
+        let report = store.switch(&hash, &g, false, &[]).unwrap();
+        assert_eq!(
+            report.drift,
+            [(
+                "~/.claude/settings.json".to_string(),
+                Drift { path: "model".into(), app: "\"sonnet\"".into(), strata: "\"opus\"".into() }
+            )]
+        );
+        assert_eq!(report.changed, ["~/.claude/settings.json"]);
+        assert_eq!(settings(&store), serde_json::json!({ "model": "opus", "env": { "A": "1", "B": "2" } }));
+    }
+
+    /// TOML merges the same way.
+    #[test]
+    fn a_toml_file_keeps_the_app_s_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("state"), dir.path().join("home"), false);
+        let (hash, g) =
+            store.realize(&[unit("~/.codex/config.toml", Kind::Merge, "model = \"a\"\n")], Inputs::default()).unwrap();
+        store.switch(&hash, &g, false, &[]).unwrap();
+        let path = store.target("~/.codex/config.toml").unwrap();
+        fs::write(&path, "model = \"b\"\n[projects.\"/x\"]\ntrust_level = \"trusted\"\n").unwrap();
+        let report = store.switch(&hash, &g, false, &[]).unwrap();
+        assert_eq!(report.drift.len(), 1);
+        let t: toml::Table = fs::read_to_string(&path).unwrap().parse().unwrap();
+        assert_eq!(t["model"].as_str(), Some("a"));
+        assert_eq!(t["projects"]["/x"]["trust_level"].as_str(), Some("trusted"));
     }
 }

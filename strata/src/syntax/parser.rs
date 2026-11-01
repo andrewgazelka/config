@@ -204,7 +204,7 @@ impl Parser<'_> {
                 let value = self.expr()?;
                 return Ok(Stmt::Const { name, value, span: self.since(lo) });
             }
-            Some(kw @ ("prefab" | "component" | "type" | "facts" | "rule")) if !next_is_colon => {
+            Some(kw @ ("prefab" | "component" | "type" | "facts" | "rule" | "layer")) if !next_is_colon => {
                 if !top {
                     return Err(Diag::new(lo, format!("`{kw}` is only allowed at the top level of a file")));
                 }
@@ -318,16 +318,16 @@ impl Parser<'_> {
                 self.expect(":")?;
                 let component = self.ident()?;
                 self.expect_word("from")?;
-                let source = if self.is_word("nix") {
-                    self.bump();
-                    let expr = self.string_lit()?;
-                    self.expect_word("lock")?;
-                    let lock = self.string_lit()?;
-                    FactSource::Nix { expr, lock }
-                } else {
-                    FactSource::Json(self.string_lit()?)
-                };
+                let source = FactSource::Json(self.string_lit()?);
                 Ok(Stmt::Facts { name, component, source, span: self.since(lo) })
+            }
+            "layer" => {
+                let optional = self.is_word("optional");
+                if optional {
+                    self.bump();
+                }
+                let dir = self.string_lit()?;
+                Ok(Stmt::Layer { dir, optional, span: self.since(lo) })
             }
             "rule" => {
                 let name = self.ident()?;
