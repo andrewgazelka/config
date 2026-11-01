@@ -1,4 +1,5 @@
-# macOS: window manager, background agents, default apps.
+# macOS: background agents, default apps. The window manager is yabai
+# (darwin/yabai.nix).
 {
   config,
   inputs,
@@ -29,12 +30,6 @@ let
   '';
 in
 {
-  # Its config is ~/.aerospace.toml, from config/aerospace.cfg.
-  programs.aerospace = {
-    enable = true;
-    launchd.enable = true;
-  };
-
   launchd.agents = {
     lifelog = {
       enable = true;
