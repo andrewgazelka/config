@@ -95,7 +95,8 @@ pub fn lower_file(db: &dyn Db, file: u32, stmts: &[Stmt]) -> FileContribs {
     let env = Env::new(scope.clone());
     for s in stmts {
         match s {
-            Stmt::Const { .. } => {}
+            // Read by `build::load`, before there is a database.
+            Stmt::Const { .. } | Stmt::Layer { .. } => {}
             Stmt::ComponentDecl { name, ty, span } => w.out.decls.push((name.name.clone(), ty.clone(), *span)),
             Stmt::TypeDecl { name, ty, span } => w.out.types.push((name.name.clone(), ty.clone(), *span)),
             Stmt::Facts { name, component, source, span } => w.out.facts.push(FactsDecl {
@@ -209,6 +210,7 @@ impl Walker<'_> {
             | Stmt::ComponentDecl { span, .. }
             | Stmt::TypeDecl { span, .. }
             | Stmt::Facts { span, .. }
+            | Stmt::Layer { span, .. }
             | Stmt::Rule { span, .. } => {
                 self.out.diags.push(Diag::new(*span, "declarations belong at the top level of a file"));
             }
@@ -216,25 +218,27 @@ impl Walker<'_> {
     }
 }
 
-/// A fact table: a JSON object of name -> value, from the command line,
-/// the `nix eval` cache, or a JSON file next to the source.
+/// Whether a fact file lives outside the config, read when it loads.
+pub fn outside_config(path: &str) -> bool {
+    path.starts_with("~/") || path.starts_with('/')
+}
+
+/// A fact table: a JSON object of name -> value, from a JSON file next to
+/// the source or one outside the config (`build::load` reads those).
 pub fn fact_table(db: &dyn Db, f: &FactsDecl) -> Result<Arc<BTreeMap<String, Value>>, Diag> {
     let ws = db.ws();
-    let text: Arc<str> = if let Some(t) = ws.facts(db).get(f.name.as_ref()) {
-        t.clone()
-    } else {
-        match &f.source {
-            FactSource::Json(rel) => {
-                let abs = normalize(&Path::new(&f.dir).join(rel)).to_string_lossy().to_string();
-                let Some(blob) = ws.blobs(db).get(&abs) else {
-                    return Err(Diag::new(f.span, format!("no fact file {rel}")));
-                };
-                String::from_utf8_lossy(blob.bytes(db)).into()
-            }
-            FactSource::Nix { .. } => {
-                return Err(Diag::new(f.span, format!("no cached facts for `{}`: run `strata nix-facts`", f.name)));
-            }
+    let FactSource::Json(path) = &f.source;
+    let text: Arc<str> = if outside_config(path) {
+        match ws.facts(db).get(f.name.as_ref()) {
+            Some(t) => t.clone(),
+            None => return Err(Diag::new(f.span, format!("no fact file {path}"))),
         }
+    } else {
+        let abs = normalize(&Path::new(&f.dir).join(path)).to_string_lossy().to_string();
+        let Some(blob) = ws.blobs(db).get(&abs) else {
+            return Err(Diag::new(f.span, format!("no fact file {path}")));
+        };
+        String::from_utf8_lossy(blob.bytes(db)).into()
     };
     let json: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| Diag::new(f.span, format!("facts `{}`: {e}", f.name)))?;

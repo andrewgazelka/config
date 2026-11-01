@@ -19,6 +19,7 @@ const STRATA: &str = env!("CARGO_BIN_EXE_strata");
 struct Bench {
     work: PathBuf,
     config: PathBuf,
+    /// The `pkgs` table config/strata.cfg reads from the home.
     facts: String,
     rows: Vec<(String, Vec<f64>)>,
 }
@@ -37,10 +38,14 @@ fn ms(d: Duration) -> f64 {
 
 impl Bench {
     fn strata(&self, name: &str) -> Command {
+        let home = self.work.join(format!("{name}-home"));
+        let table = home.join(".config/strata/facts/pkgs.json");
+        fs::create_dir_all(table.parent().unwrap()).unwrap();
+        fs::write(&table, &self.facts).unwrap();
         let mut c = Command::new(STRATA);
-        c.arg("--config").arg(&self.config).arg("--facts").arg(&self.facts);
+        c.arg("--config").arg(&self.config);
         c.arg("--state").arg(self.work.join(format!("{name}-state")));
-        c.arg("--home").arg(self.work.join(format!("{name}-home")));
+        c.arg("--home").arg(home);
         c
     }
 
@@ -155,18 +160,23 @@ fn main() {
     let repo = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let tmp = tempfile::tempdir().unwrap();
     let work = tmp.path().to_path_buf();
-    // The config and the lock its fact table names, side by side as in the repo.
     let config = work.join("config");
     copy_dir(&repo.join("config"), &config);
-    fs::copy(repo.join("flake.lock"), work.join("flake.lock")).unwrap();
+    // Store paths are only linked to, never read, so stand-ins do: the
+    // table's names, without building anything.
+    let expr = format!("builtins.attrNames (import {}/nix/facts.nix {{ pkgs = {{ }}; }})", config.display());
+    let out = Command::new("nix").args(["eval", "--json", "--impure", "--expr", &expr]).output().unwrap();
+    assert!(out.status.success(), "nix eval: {}", String::from_utf8_lossy(&out.stderr));
+    let names: Vec<String> = serde_json::from_slice(&out.stdout).unwrap();
+    let facts = serde_json::to_string(
+        &names
+            .iter()
+            .map(|n| (n.clone(), format!("/nix/store/00000000000000000000000000000000-{n}")))
+            .collect::<std::collections::BTreeMap<_, _>>(),
+    )
+    .unwrap();
 
-    let state = work.join("facts-state");
-    let out =
-        Command::new(STRATA).arg("--config").arg(&config).arg("--state").arg(&state).arg("nix-facts").output().unwrap();
-    assert!(out.status.success(), "nix-facts: {}", String::from_utf8_lossy(&out.stderr));
-    let table = fs::read_dir(state.join("facts")).unwrap().flatten().next().expect("a cached fact table").path();
-
-    let mut b = Bench { work, config, facts: format!("pkgs={}", table.display()), rows: Vec::new() };
+    let mut b = Bench { work, config, facts, rows: Vec::new() };
     b.cold();
     b.warm();
     b.edits("zed settings.json (copy)", ".config/zed/settings.json", "zed.cfg", "tab_size: {}", "\"tab_size\": {}", 2);

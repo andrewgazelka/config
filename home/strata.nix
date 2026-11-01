@@ -1,5 +1,7 @@
 # strata writes the dotfiles in config/. This agent applies the checkout at
-# login and again on every save, so ~ always matches the repo.
+# login and again on every save, so ~ always matches the repo. It names only
+# the config, as a hand run from the repo root does: the layers and fact
+# tables are declared in config/strata.cfg, not passed here.
 {
   config,
   pkgs,
@@ -10,15 +12,15 @@ let
   repo = "/Volumes/Projects/nix";
   inherit (pkgs.stdenv.hostPlatform) system;
   strata = self.packages.${system}.strata;
-
-  # The store paths config/ links to, from this system's nixpkgs. Being in
-  # the agent's closure keeps them alive for as long as the system is.
-  facts = pkgs.writeText "strata-facts.json" (
-    builtins.toJSON (import ../config/nix/facts.nix { inherit system pkgs; })
-  );
 in
 {
   home.packages = [ strata ];
+
+  # The store paths config/ links to, from this system's nixpkgs. Linked
+  # from the home generation, which keeps them alive as long as it is.
+  xdg.configFile."strata/facts/pkgs.json".text = builtins.toJSON (
+    import ../config/nix/facts.nix { inherit pkgs; }
+  );
 
   launchd.agents.strata = {
     enable = true;
@@ -27,10 +29,6 @@ in
         "${strata}/bin/strata"
         "--config"
         "${repo}/config"
-        "--config-optional"
-        "${repo}/private/config"
-        "--facts"
-        "pkgs=${facts}"
         "watch"
       ];
       KeepAlive = true;

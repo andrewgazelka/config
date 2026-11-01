@@ -12,6 +12,7 @@ in
     ./blocklist.nix
     ./defaults.nix
     ./homebrew.nix
+    ./yabai.nix
   ];
 
   nixpkgs.hostPlatform = "aarch64-darwin";
