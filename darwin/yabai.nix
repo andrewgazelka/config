@@ -71,9 +71,6 @@ let
   spaceScript = pkgs.writeShellScript "sketchybar-space" ''
     ${bar} --set "$NAME" background.drawing="$([ "$SELECTED" = true ] && echo on || echo off)"
   '';
-  frontAppScript = pkgs.writeShellScript "sketchybar-front-app" ''
-    [ "$SENDER" = front_app_switched ] && ${bar} --set "$NAME" label="$INFO"
-  '';
   clockScript = pkgs.writeShellScript "sketchybar-clock" ''
     ${bar} --set "$NAME" label="$(date '+%a %-d %b  %H:%M:%S')"
   '';
@@ -114,9 +111,9 @@ in
     '';
   };
 
-  # The top bar: spaces (current one highlighted), the front app, battery and
-  # clock. The native menu bar auto-hides (_HIHideMenuBar), so this sits in
-  # its place; yabai's external_bar keeps windows below it.
+  # The top bar: spaces (current one highlighted), battery and clock. The
+  # native menu bar auto-hides (_HIHideMenuBar), so this sits in its place;
+  # yabai's external_bar keeps windows below it.
   services.sketchybar = {
     enable = true;
     config = ''
@@ -134,10 +131,6 @@ in
             background.corner_radius=6 background.height=24 background.drawing=off \
             script=${spaceScript}
       done
-
-      $bar --add item front_app left \
-        --set front_app label.font="${font "Bold"}" label.padding_left=12 script=${frontAppScript} \
-        --subscribe front_app front_app_switched
 
       $bar --add item clock right \
         --set clock update_freq=1 script=${clockScript} \
