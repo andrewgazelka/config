@@ -146,7 +146,7 @@ in
         --subscribe battery system_woke power_source_change
 
       $bar --add event theme_changed AppleInterfaceThemeChangedNotification \
-        --add item theme left --set theme drawing=off script=${themeScript} \
+        --add item theme left --set theme drawing=off updates=on script=${themeScript} \
         --subscribe theme theme_changed
 
       $bar --update
