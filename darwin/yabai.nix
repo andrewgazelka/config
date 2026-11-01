@@ -80,6 +80,12 @@ in
     '';
   };
 
+  # skhd and yabai signals run commands with $SHELL -c. The login shell is
+  # nushell, which has no `||` or `$(...)`, so the bindings below failed
+  # silently under it.
+  launchd.user.agents.skhd.serviceConfig.EnvironmentVariables.SHELL = "/bin/sh";
+  launchd.user.agents.yabai.serviceConfig.EnvironmentVariables.SHELL = "/bin/sh";
+
   services.skhd = {
     enable = true;
     skhdConfig =
