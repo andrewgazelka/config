@@ -50,6 +50,27 @@ let
   };
   perDirection = f: lib.concatStrings (lib.mapAttrsToList f directions);
   perSpace = f: lib.concatMapStrings f spaces;
+
+  barHeight = 32;
+  bar = lib.getExe pkgs.sketchybar;
+  spaceScript = pkgs.writeShellScript "sketchybar-space" ''
+    if [ "$SELECTED" = true ]; then
+      ${bar} --set "$NAME" background.drawing=on icon.color=0xff1e1e2e
+    else
+      ${bar} --set "$NAME" background.drawing=off icon.color=0xffcdd6f4
+    fi
+  '';
+  frontAppScript = pkgs.writeShellScript "sketchybar-front-app" ''
+    [ "$SENDER" = front_app_switched ] && ${bar} --set "$NAME" label="$INFO"
+  '';
+  clockScript = pkgs.writeShellScript "sketchybar-clock" ''
+    ${bar} --set "$NAME" label="$(date '+%a %d %b  %H:%M')"
+  '';
+  batteryScript = pkgs.writeShellScript "sketchybar-battery" ''
+    pct=$(/usr/bin/pmset -g batt | /usr/bin/grep -Eo '[0-9]+%' | head -1)
+    case "$(/usr/bin/pmset -g batt)" in *"AC Power"*) pct="⚡ $pct" ;; esac
+    ${bar} --set "$NAME" label="$pct"
+  '';
 in
 {
   services.yabai = {
@@ -63,6 +84,7 @@ in
       focus_follows_mouse = "off";
       window_animation_duration = 0;
       window_gap = 0;
+      external_bar = "all:${toString barHeight}:0";
     };
     extraConfig = ''
       # The Dock loses the scripting addition whenever it restarts.
@@ -79,6 +101,44 @@ in
       ${y} -m rule --apply
     '';
   };
+
+  # The top bar: spaces (current one highlighted), the front app, battery and
+  # clock. The native menu bar auto-hides (_HIHideMenuBar), so this sits in
+  # its place; yabai's external_bar keeps windows below it.
+  services.sketchybar = {
+    enable = true;
+    config = ''
+      #!/bin/sh
+      bar=${bar}
+      $bar --bar height=${toString barHeight} position=top color=0xd01e1e2e \
+        padding_left=8 padding_right=8 topmost=window
+      $bar --default updates=when_shown \
+        icon.font="Inter:Semibold:13.0" label.font="Inter:Semibold:13.0" \
+        icon.color=0xffcdd6f4 label.color=0xffcdd6f4 \
+        padding_left=4 padding_right=4 label.padding_left=4 label.padding_right=4
+
+      for n in ${lib.concatMapStringsSep " " toString spaces}; do
+        $bar --add space space.$n left \
+          --set space.$n associated_space=$n icon=$n \
+            icon.padding_left=8 icon.padding_right=8 \
+            background.color=0xff89b4fa background.corner_radius=5 background.height=22 \
+            background.drawing=off script=${spaceScript}
+      done
+
+      $bar --add item front_app left \
+        --set front_app icon.drawing=off label.padding_left=12 script=${frontAppScript} \
+        --subscribe front_app front_app_switched
+
+      $bar --add item clock right \
+        --set clock update_freq=10 icon.drawing=off script=${clockScript} \
+        --add item battery right \
+        --set battery update_freq=120 icon.drawing=off script=${batteryScript} \
+        --subscribe battery system_woke power_source_change
+
+      $bar --update
+    '';
+  };
+  launchd.user.agents.sketchybar.serviceConfig.EnvironmentVariables.SHELL = "/bin/sh";
 
   # skhd and yabai signals run commands with $SHELL -c. The login shell is
   # nushell, which has no `||` or `$(...)`, so the bindings below failed
