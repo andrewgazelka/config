@@ -56,13 +56,13 @@ let
   barHeight = 38;
   bar = lib.getExe pkgs.sketchybar;
   font = style: ".AppleSystemUIFont:${style}:13.0";
-  # Follows light/dark mode like the native menu bar: translucent over a blur,
-  # black or white text, a faint highlight on the current space.
+  # Follows light/dark mode with Ghostty's custom-light / custom-dark colors
+  # (config/ghostty.cfg): background, foreground, selection for the current space.
   themeScript = pkgs.writeShellScript "sketchybar-theme" ''
     if /usr/bin/defaults read -g AppleInterfaceStyle 2>/dev/null | /usr/bin/grep -q Dark; then
-      fg=0xf2ffffff bg=0x661c1c1e hl=0x33ffffff
+      fg=0xffd4d4d4 bg=0xff1e1e1e hl=0xff313244
     else
-      fg=0xe6000000 bg=0x99f5f5f7 hl=0x1f000000
+      fg=0xff2a2c33 bg=0xfff9f9f9 hl=0xffe9e9e9
     fi
     ${bar} --bar color=$bg \
       --set '/.*/' icon.color=$fg label.color=$fg \
@@ -122,7 +122,7 @@ in
     config = ''
       #!/bin/sh
       bar=${bar}
-      $bar --bar height=${toString barHeight} position=top blur_radius=40 \
+      $bar --bar height=${toString barHeight} position=top \
         padding_left=10 padding_right=10 topmost=window shadow=off
       $bar --default updates=when_shown icon.drawing=off \
         label.font="${font "Regular"}" padding_left=0 padding_right=0 \
