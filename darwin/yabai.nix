@@ -51,24 +51,36 @@ let
   perDirection = f: lib.concatStrings (lib.mapAttrsToList f directions);
   perSpace = f: lib.concatMapStrings f spaces;
 
-  barHeight = 32;
+  # The notch display's top inset: windows start at y=38, so a shorter bar
+  # leaves a strip of wallpaper under it.
+  barHeight = 38;
   bar = lib.getExe pkgs.sketchybar;
-  spaceScript = pkgs.writeShellScript "sketchybar-space" ''
-    if [ "$SELECTED" = true ]; then
-      ${bar} --set "$NAME" background.drawing=on icon.color=0xff1e1e2e
+  font = style: ".AppleSystemUIFont:${style}:13.0";
+  # Follows light/dark mode like the native menu bar: translucent over a blur,
+  # black or white text, a faint highlight on the current space.
+  themeScript = pkgs.writeShellScript "sketchybar-theme" ''
+    if /usr/bin/defaults read -g AppleInterfaceStyle 2>/dev/null | /usr/bin/grep -q Dark; then
+      fg=0xf2ffffff bg=0x661c1c1e hl=0x33ffffff
     else
-      ${bar} --set "$NAME" background.drawing=off icon.color=0xffcdd6f4
+      fg=0xe6000000 bg=0x99f5f5f7 hl=0x1f000000
     fi
+    ${bar} --bar color=$bg \
+      --set '/.*/' icon.color=$fg label.color=$fg \
+      --set '/space\..*/' background.color=$hl
+  '';
+  spaceScript = pkgs.writeShellScript "sketchybar-space" ''
+    ${bar} --set "$NAME" background.drawing="$([ "$SELECTED" = true ] && echo on || echo off)"
   '';
   frontAppScript = pkgs.writeShellScript "sketchybar-front-app" ''
     [ "$SENDER" = front_app_switched ] && ${bar} --set "$NAME" label="$INFO"
   '';
   clockScript = pkgs.writeShellScript "sketchybar-clock" ''
-    ${bar} --set "$NAME" label="$(date '+%a %d %b  %H:%M')"
+    ${bar} --set "$NAME" label="$(date '+%a %-d %b  %H:%M:%S')"
   '';
   batteryScript = pkgs.writeShellScript "sketchybar-battery" ''
-    pct=$(/usr/bin/pmset -g batt | /usr/bin/grep -Eo '[0-9]+%' | head -1)
-    case "$(/usr/bin/pmset -g batt)" in *"AC Power"*) pct="⚡ $pct" ;; esac
+    batt=$(/usr/bin/pmset -g batt)
+    pct=$(echo "$batt" | /usr/bin/grep -Eo '[0-9]+%' | head -1)
+    case "$batt" in *"AC Power"*) pct="$pct ⚡" ;; esac
     ${bar} --set "$NAME" label="$pct"
   '';
 in
@@ -110,32 +122,35 @@ in
     config = ''
       #!/bin/sh
       bar=${bar}
-      $bar --bar height=${toString barHeight} position=top color=0xd01e1e2e \
-        padding_left=8 padding_right=8 topmost=window
-      $bar --default updates=when_shown \
-        icon.font="Inter:Semibold:13.0" label.font="Inter:Semibold:13.0" \
-        icon.color=0xffcdd6f4 label.color=0xffcdd6f4 \
-        padding_left=4 padding_right=4 label.padding_left=4 label.padding_right=4
+      $bar --bar height=${toString barHeight} position=top blur_radius=40 \
+        padding_left=10 padding_right=10 topmost=window shadow=off
+      $bar --default updates=when_shown icon.drawing=off \
+        label.font="${font "Regular"}" padding_left=0 padding_right=0 \
+        label.padding_left=8 label.padding_right=8
 
       for n in ${lib.concatMapStringsSep " " toString spaces}; do
         $bar --add space space.$n left \
-          --set space.$n associated_space=$n icon=$n \
-            icon.padding_left=8 icon.padding_right=8 \
-            background.color=0xff89b4fa background.corner_radius=5 background.height=22 \
-            background.drawing=off script=${spaceScript}
+          --set space.$n associated_space=$n label=$n label.padding_left=9 label.padding_right=9 \
+            background.corner_radius=6 background.height=24 background.drawing=off \
+            script=${spaceScript}
       done
 
       $bar --add item front_app left \
-        --set front_app icon.drawing=off label.padding_left=12 script=${frontAppScript} \
+        --set front_app label.font="${font "Bold"}" label.padding_left=12 script=${frontAppScript} \
         --subscribe front_app front_app_switched
 
       $bar --add item clock right \
-        --set clock update_freq=10 icon.drawing=off script=${clockScript} \
+        --set clock update_freq=1 script=${clockScript} \
         --add item battery right \
-        --set battery update_freq=120 icon.drawing=off script=${batteryScript} \
+        --set battery update_freq=120 script=${batteryScript} \
         --subscribe battery system_woke power_source_change
 
+      $bar --add event theme_changed AppleInterfaceThemeChangedNotification \
+        --add item theme left --set theme drawing=off script=${themeScript} \
+        --subscribe theme theme_changed
+
       $bar --update
+      ${themeScript}
     '';
   };
   launchd.user.agents.sketchybar.serviceConfig.EnvironmentVariables.SHELL = "/bin/sh";
