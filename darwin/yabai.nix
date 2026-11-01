@@ -28,11 +28,25 @@ let
 
   spaces = lib.range 1 10;
   key = n: toString (lib.mod n 10); # alt-0 is space 10
+  # Each key's stack neighbour, for the stacked layout (alt-a), where
+  # west/south/north/east find nothing.
   directions = {
-    h = "west";
-    j = "south";
-    k = "north";
-    l = "east";
+    h = {
+      dir = "west";
+      stack = "prev";
+    };
+    j = {
+      dir = "south";
+      stack = "next";
+    };
+    k = {
+      dir = "north";
+      stack = "prev";
+    };
+    l = {
+      dir = "east";
+      stack = "next";
+    };
   };
   perDirection = f: lib.concatStrings (lib.mapAttrsToList f directions);
   perSpace = f: lib.concatMapStrings f spaces;
@@ -75,9 +89,9 @@ in
       '')
       + perDirection (
         k: d: ''
-          alt - ${k} : ${y} -m window --focus ${d}
-          ctrl + alt + shift - ${k} : ${y} -m window --swap ${d}
-          alt + shift - ${k} : ${y} -m window --warp ${d}
+          alt - ${k} : ${y} -m window --focus ${d.dir} || ${y} -m window --focus stack.${d.stack}
+          ctrl + alt + shift - ${k} : ${y} -m window --swap ${d.dir}
+          alt + shift - ${k} : ${y} -m window --warp ${d.dir}
         ''
       )
       + ''
@@ -85,8 +99,9 @@ in
         alt - 0x32 : ${y} -m window --focus recent
         alt - a : ${y} -m space --layout "$(${y} -m query --spaces --space | ${jq} -r 'if .type == "bsp" then "stack" else "bsp" end')"
         alt + shift - e : ${y} -m space --balance
-        alt + shift - 0x1B : ${y} -m window --ratio rel:-0.05
-        alt + shift - 0x18 : ${y} -m window --ratio rel:0.05
+        # Shrink or grow the focused window by 50px, whichever side its split is on.
+        alt + shift - 0x1B : ${y} -m window --resize right:-50:0 || ${y} -m window --resize left:50:0
+        alt + shift - 0x18 : ${y} -m window --resize right:50:0 || ${y} -m window --resize left:-50:0
       '';
   };
 }
