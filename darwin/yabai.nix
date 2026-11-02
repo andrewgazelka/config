@@ -1,10 +1,12 @@
 # yabai + skhd, replacing AeroSpace. The keys mirror the old AeroSpace ones.
 #
-# yabai comes from AhsanFazal/yabai: upstream (asmvik/yabai) has had no
-# commits since June and its scripting addition can't find the Dock's
-# functions on macOS 27, so space switching silently does nothing. The fork
-# carries the macOS 27.0.1 and 27.2 Dock signatures. Its version string is
-# still upstream's 7.1.25.
+# yabai comes from andrewgazelka/yabai, a fork of AhsanFazal/yabai: upstream
+# (asmvik/yabai) has had no commits since June and its scripting addition
+# can't find the Dock's functions on macOS 27, so space switching silently
+# does nothing. AhsanFazal's fork carries the macOS 27.0.1 and 27.2 Dock
+# signatures; ours adds our own fixes on top (freezing screen updates while
+# setting frames, so the wallpaper doesn't flash between windows). Its version
+# string is still upstream's 7.1.25.
 #
 # The scripting addition needs SIP partly off
 # (`csrutil enable --without fs --without debug --without nvram` from
@@ -13,18 +15,13 @@
 { lib, pkgs, ... }:
 let
   yabai = pkgs.yabai.overrideAttrs (old: {
-    version = "7.1.25-unstable-2026-10-31";
+    version = "7.1.25-unstable-2026-11-02";
     src = pkgs.fetchFromGitHub {
-      owner = "AhsanFazal";
+      owner = "andrewgazelka";
       repo = "yabai";
-      rev = "ad8d5adfdc39c76399599ae79a264f2525f6ca5e";
-      hash = "sha256-berfA3vYih1YuCCSBEvpocCn2EPj+ZpftPmsE65ILWo=";
+      rev = "7f4956ed351c51316e9eb4b43049d6ef9876fc01";
+      hash = "sha256-aBAcWgS28bmRklHWwNvt3ErA4vRES7PHmW9aPhd4jjw=";
     };
-    # With window_animation_duration 0, yabai sets each window's frame one
-    # after another over AX, so the wallpaper flashes through the gap between
-    # one window shrinking and its neighbour growing. Freeze screen updates
-    # while it sets the batch, as its animation path already does.
-    patches = (old.patches or [ ]) ++ [ ./yabai-freeze-frame-updates.patch ];
     # `yabai --version` prints upstream's 7.1.25, not this version.
     doInstallCheck = false;
   });
