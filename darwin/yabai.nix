@@ -79,21 +79,21 @@ let
   clockScript = pkgs.writeShellScript "sketchybar-clock" ''
     ${bar} --set "$NAME" label="$(date '+%a %-d %b  %H:%M:%S')"
   '';
-  # AeroSpace's `resize smart`: grow or shrink along the window's split, so a
-  # window in a top/bottom split changes height, not width. Tries the far edge
-  # first, then the near one (the far edge has no fence for the last child).
-  # A second argument `cross` resizes the other axis instead.
+  # Grow or shrink the focused window: `resize <px> w|h`. The edge is picked
+  # from the frame: the right/bottom edge unless it touches the display edge,
+  # then the left/top one. Don't try one edge and fall back on failure: with no
+  # fence on that side yabai sometimes moves the opposite fence the wrong way
+  # and still exits 0, so repeated presses flip back and forth.
   resizeScript = pkgs.writeShellScript "yabai-resize" ''
     d=$1
-    split=$(${y} -m query --windows --window | ${jq} -r '."split-type"')
-    if [ "$2" = cross ]; then
-      [ "$split" = horizontal ] && split=vertical || split=horizontal
-    fi
-    if [ "$split" = horizontal ]; then
-      ${y} -m window --resize bottom:0:$d || ${y} -m window --resize top:0:$((-d))
-    else
-      ${y} -m window --resize right:$d:0 || ${y} -m window --resize left:$((-d)):0
-    fi
+    set -- $( { ${y} -m query --windows --window; ${y} -m query --displays --window; } | ${jq} -rs --arg axis "$2" '
+      .[0].frame as $w | .[1].frame as $f |
+      if $axis == "h" then
+        if $w.y + $w.h >= $f.y + $f.h - 1 then "top 0 -1" else "bottom 0 1" end
+      else
+        if $w.x + $w.w >= $f.x + $f.w - 1 then "left -1 0" else "right 1 0" end
+      end')
+    ${y} -m window --resize "$1:$(($2 * d)):$(($3 * d))"
   '';
   batteryScript = pkgs.writeShellScript "sketchybar-battery" ''
     batt=$(/usr/bin/pmset -g batt)
@@ -194,12 +194,11 @@ in
         alt - 0x32 : ${y} -m window --focus recent
         alt - a : ${y} -m space --layout "$(${y} -m query --spaces --space | ${jq} -r 'if .type == "bsp" then "stack" else "bsp" end')"
         alt + shift - e : ${y} -m space --balance
-        # Shrink or grow the focused window by 50px along its split; with ctrl,
-        # along the other axis.
-        alt + shift - 0x1B : ${resizeScript} -50
-        alt + shift - 0x18 : ${resizeScript} 50
-        ctrl + alt + shift - 0x1B : ${resizeScript} -50 cross
-        ctrl + alt + shift - 0x18 : ${resizeScript} 50 cross
+        # Shrink or grow the focused window by 50px: width, or height with ctrl.
+        alt + shift - 0x1B : ${resizeScript} -50 w
+        alt + shift - 0x18 : ${resizeScript} 50 w
+        ctrl + alt + shift - 0x1B : ${resizeScript} -50 h
+        ctrl + alt + shift - 0x18 : ${resizeScript} 50 h
       '';
   };
 }
