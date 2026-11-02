@@ -33,6 +33,8 @@ CMakeFiles/
 cmake_install.cmake
 _deps/
 cpm-package-lock.cmake
+.svelte-kit/
+.wrangler/
 
 # Build outputs whose names are also ordinary source names: anchored.
 /build/
@@ -41,3 +43,4 @@ cpm-package-lock.cmake
 /result
 /result-*
 /dump*.json
+/site/build/

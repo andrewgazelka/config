@@ -2,8 +2,6 @@
 { lib, ... }:
 let
   dns = [
-    "discord.com"
-    "discord.gg"
     "twitch.tv"
     "netflix.com"
   ];

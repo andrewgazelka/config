@@ -78,6 +78,7 @@ in
     fira-code
     inter
     iosevka-bin
+    lilex
     nerd-fonts.fira-code
     nerd-fonts.iosevka-term-slab
   ];
