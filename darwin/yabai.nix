@@ -20,6 +20,11 @@ let
       rev = "ad8d5adfdc39c76399599ae79a264f2525f6ca5e";
       hash = "sha256-berfA3vYih1YuCCSBEvpocCn2EPj+ZpftPmsE65ILWo=";
     };
+    # With window_animation_duration 0, yabai sets each window's frame one
+    # after another over AX, so the wallpaper flashes through the gap between
+    # one window shrinking and its neighbour growing. Freeze screen updates
+    # while it sets the batch, as its animation path already does.
+    patches = (old.patches or [ ]) ++ [ ./yabai-freeze-frame-updates.patch ];
     # `yabai --version` prints upstream's 7.1.25, not this version.
     doInstallCheck = false;
   });

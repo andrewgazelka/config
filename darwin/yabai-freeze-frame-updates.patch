@@ -1,0 +1,26 @@
+diff --git a/src/window_manager.c b/src/window_manager.c
+index d8b5522..f780f6f 100644
+--- a/src/window_manager.c
++++ b/src/window_manager.c
+@@ -709,9 +709,11 @@ void window_manager_animate_window_list(struct window_capture *window_list, int
+     if (g_window_manager.window_animation_duration) {
+         window_manager_animate_window_list_async(window_list, window_count);
+     } else {
++        SLSDisableUpdate(g_connection);
+         for (int i = 0; i < window_count; ++i) {
+             window_manager_set_window_frame(window_list[i].window, window_list[i].x, window_list[i].y, window_list[i].w, window_list[i].h);
+         }
++        SLSReenableUpdate(g_connection);
+     }
+ }
+ 
+@@ -722,7 +724,9 @@ void window_manager_animate_window(struct window_capture capture)
+     if (g_window_manager.window_animation_duration) {
+         window_manager_animate_window_list_async(&capture, 1);
+     } else {
++        SLSDisableUpdate(g_connection);
+         window_manager_set_window_frame(capture.window, capture.x, capture.y, capture.w, capture.h);
++        SLSReenableUpdate(g_connection);
+     }
+ }
+ 
