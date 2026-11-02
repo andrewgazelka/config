@@ -48,28 +48,15 @@ let
   perDirection = f: lib.concatStrings (lib.mapAttrsToList f directions);
   perSpace = f: lib.concatMapStrings f spaces;
 
-  # The notch display's top inset: windows start at y=38, so a shorter bar
-  # leaves a strip of wallpaper under it.
-  barHeight = 38;
   bar = lib.getExe pkgs.sketchybar;
-  font = style: ".AppleSystemUIFont:${style}:13.0";
-  # Follows light/dark mode with Ghostty's custom-light / custom-dark colors
-  # (config/ghostty.cfg): background, foreground, selection for the current space.
-  themeScript = pkgs.writeShellScript "sketchybar-theme" ''
+  # Follows light/dark mode: a solid wallpaper in Ghostty's custom-light /
+  # custom-dark background (config/ghostty.cfg).
+  themeScript = pkgs.writeShellScript "wallpaper-theme" ''
     if /usr/bin/defaults read -g AppleInterfaceStyle 2>/dev/null | /usr/bin/grep -q Dark; then
-      fg=0xffd4d4d4 bg=0xff1e1e1e hl=0xff313244 wp=${wallpaper "1e1e1e"}
+      ${desktoppr} ${wallpaper "1e1e1e"}
     else
-      fg=0xff2a2c33 bg=0xfff9f9f9 hl=0xffe9e9e9 wp=${wallpaper "f9f9f9"}
+      ${desktoppr} ${wallpaper "f9f9f9"}
     fi
-    ${desktoppr} "$wp"
-    # Setting background.color also turns the background on, so turn it back
-    # off and redraw only the spaces visible on some display.
-    ${bar} --bar color=$bg \
-      --set '/.*/' icon.color=$fg label.color=$fg \
-      --set '/space\..*/' background.color=$hl background.drawing=off
-    for n in $(${y} -m query --spaces | ${jq} -r '.[] | select(."is-visible") | .index'); do
-      ${bar} --set space.$n background.drawing=on
-    done
   '';
   # A solid wallpaper in Ghostty's background colour, so the gap that shows
   # for a moment while an app redraws at a new size matches the terminal.
@@ -79,12 +66,6 @@ let
       magick -size 64x64 xc:'#${color}' $out
     '';
   desktoppr = lib.getExe pkgs.desktoppr;
-  spaceScript = pkgs.writeShellScript "sketchybar-space" ''
-    ${bar} --set "$NAME" background.drawing="$([ "$SELECTED" = true ] && echo on || echo off)"
-  '';
-  clockScript = pkgs.writeShellScript "sketchybar-clock" ''
-    ${bar} --set "$NAME" label="$(date '+%a %-d %b  %H:%M:%S')"
-  '';
   # Grow or shrink the focused window: `resize <px> w|h`. The edge is picked
   # from the frame: the right/bottom edge unless it touches the display edge,
   # then the left/top one. Don't try one edge and fall back on failure: with no
@@ -100,12 +81,6 @@ let
         if $w.x + $w.w >= $f.x + $f.w - 1 then "left -1 0" else "right 1 0" end
       end')
     ${y} -m window --resize "$1:$(($2 * d)):$(($3 * d))"
-  '';
-  batteryScript = pkgs.writeShellScript "sketchybar-battery" ''
-    batt=$(/usr/bin/pmset -g batt)
-    pct=$(echo "$batt" | /usr/bin/grep -Eo '[0-9]+%' | head -1)
-    case "$batt" in *"AC Power"*) pct="$pct ⚡" ;; esac
-    ${bar} --set "$NAME" label="$pct"
   '';
 in
 {
@@ -123,7 +98,6 @@ in
       window_animation_duration = 0;
       window_shadow = "off";
       window_gap = 0;
-      external_bar = "all:${toString barHeight}:0";
     };
     extraConfig = ''
       # The Dock loses the scripting addition whenever it restarts.
@@ -141,38 +115,17 @@ in
     '';
   };
 
-  # The top bar: spaces (current one highlighted), battery and clock. The
-  # native menu bar auto-hides (_HIHideMenuBar), so this sits in its place;
-  # yabai's external_bar keeps windows below it.
+  # The native menu bar is used. sketchybar draws nothing; it only runs the
+  # wallpaper script when light/dark mode changes.
   services.sketchybar = {
     enable = true;
     config = ''
       #!/bin/sh
       bar=${bar}
-      $bar --bar height=${toString barHeight} position=top \
-        padding_left=10 padding_right=10 topmost=window shadow=off
-      $bar --default updates=when_shown icon.drawing=off \
-        label.font="${font "Regular"}" padding_left=0 padding_right=0 \
-        label.padding_left=8 label.padding_right=8
-
-      for n in ${lib.concatMapStringsSep " " toString spaces}; do
-        $bar --add space space.$n left \
-          --set space.$n associated_space=$n label=$n label.padding_left=9 label.padding_right=9 \
-            background.corner_radius=6 background.height=24 background.drawing=off \
-            script=${spaceScript}
-      done
-
-      $bar --add item clock right \
-        --set clock update_freq=1 script=${clockScript} \
-        --add item battery right \
-        --set battery update_freq=120 script=${batteryScript} \
-        --subscribe battery system_woke power_source_change
-
+      $bar --bar hidden=on
       $bar --add event theme_changed AppleInterfaceThemeChangedNotification \
         --add item theme left --set theme drawing=off updates=on script=${themeScript} \
         --subscribe theme theme_changed
-
-      $bar --update
       ${themeScript}
     '';
   };

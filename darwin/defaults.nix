@@ -9,6 +9,7 @@
       AppleICUForce24HourTime = true;
       NSWindowShouldDragOnGesture = true;
       NSWindowResizeTime = 0.001;
+      _HIHideMenuBar = false; # show the native menu bar
       NSNavPanelExpandedStateForSaveMode = true;
       NSNavPanelExpandedStateForSaveMode2 = true;
       PMPrintingExpandedStateForPrint = true;
