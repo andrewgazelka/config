@@ -64,15 +64,31 @@ let
     else
       fg=0xff2a2c33 bg=0xfff9f9f9 hl=0xffe9e9e9
     fi
+    # Setting background.color also turns the background on, so turn it back
+    # off and redraw only the spaces visible on some display.
     ${bar} --bar color=$bg \
       --set '/.*/' icon.color=$fg label.color=$fg \
-      --set '/space\..*/' background.color=$hl
+      --set '/space\..*/' background.color=$hl background.drawing=off
+    for n in $(${y} -m query --spaces | ${jq} -r '.[] | select(."is-visible") | .index'); do
+      ${bar} --set space.$n background.drawing=on
+    done
   '';
   spaceScript = pkgs.writeShellScript "sketchybar-space" ''
     ${bar} --set "$NAME" background.drawing="$([ "$SELECTED" = true ] && echo on || echo off)"
   '';
   clockScript = pkgs.writeShellScript "sketchybar-clock" ''
     ${bar} --set "$NAME" label="$(date '+%a %-d %b  %H:%M:%S')"
+  '';
+  # AeroSpace's `resize smart`: grow or shrink along the window's split, so a
+  # window in a top/bottom split changes height, not width. Tries the far edge
+  # first, then the near one (the far edge has no fence for the last child).
+  resizeScript = pkgs.writeShellScript "yabai-resize" ''
+    d=$1
+    if [ "$(${y} -m query --windows --window | ${jq} -r '."split-type"')" = horizontal ]; then
+      ${y} -m window --resize bottom:0:$d || ${y} -m window --resize top:0:$((-d))
+    else
+      ${y} -m window --resize right:$d:0 || ${y} -m window --resize left:$((-d)):0
+    fi
   '';
   batteryScript = pkgs.writeShellScript "sketchybar-battery" ''
     batt=$(/usr/bin/pmset -g batt)
@@ -173,9 +189,9 @@ in
         alt - 0x32 : ${y} -m window --focus recent
         alt - a : ${y} -m space --layout "$(${y} -m query --spaces --space | ${jq} -r 'if .type == "bsp" then "stack" else "bsp" end')"
         alt + shift - e : ${y} -m space --balance
-        # Shrink or grow the focused window by 50px, whichever side its split is on.
-        alt + shift - 0x1B : ${y} -m window --resize right:-50:0 || ${y} -m window --resize left:50:0
-        alt + shift - 0x18 : ${y} -m window --resize right:50:0 || ${y} -m window --resize left:-50:0
+        # Shrink or grow the focused window by 50px along its split.
+        alt + shift - 0x1B : ${resizeScript} -50
+        alt + shift - 0x18 : ${resizeScript} 50
       '';
   };
 }
