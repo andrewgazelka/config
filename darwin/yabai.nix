@@ -82,9 +82,14 @@ let
   # AeroSpace's `resize smart`: grow or shrink along the window's split, so a
   # window in a top/bottom split changes height, not width. Tries the far edge
   # first, then the near one (the far edge has no fence for the last child).
+  # A second argument `cross` resizes the other axis instead.
   resizeScript = pkgs.writeShellScript "yabai-resize" ''
     d=$1
-    if [ "$(${y} -m query --windows --window | ${jq} -r '."split-type"')" = horizontal ]; then
+    split=$(${y} -m query --windows --window | ${jq} -r '."split-type"')
+    if [ "$2" = cross ]; then
+      [ "$split" = horizontal ] && split=vertical || split=horizontal
+    fi
+    if [ "$split" = horizontal ]; then
       ${y} -m window --resize bottom:0:$d || ${y} -m window --resize top:0:$((-d))
     else
       ${y} -m window --resize right:$d:0 || ${y} -m window --resize left:$((-d)):0
@@ -189,9 +194,12 @@ in
         alt - 0x32 : ${y} -m window --focus recent
         alt - a : ${y} -m space --layout "$(${y} -m query --spaces --space | ${jq} -r 'if .type == "bsp" then "stack" else "bsp" end')"
         alt + shift - e : ${y} -m space --balance
-        # Shrink or grow the focused window by 50px along its split.
+        # Shrink or grow the focused window by 50px along its split; with ctrl,
+        # along the other axis.
         alt + shift - 0x1B : ${resizeScript} -50
         alt + shift - 0x18 : ${resizeScript} 50
+        ctrl + alt + shift - 0x1B : ${resizeScript} -50 cross
+        ctrl + alt + shift - 0x18 : ${resizeScript} 50 cross
       '';
   };
 }
