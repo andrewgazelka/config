@@ -109,7 +109,10 @@ in
       window_placement = "second_child";
       mouse_follows_focus = "off";
       focus_follows_mouse = "off";
-      window_animation_duration = 0;
+      # Not 0: during an animation yabai covers each window with a snapshot
+      # until the app has redrawn at its new size, so the wallpaper never shows
+      # through. With 0 it shows for a moment while apps catch up.
+      window_animation_duration = 0.1;
       window_gap = 0;
       external_bar = "all:${toString barHeight}:0";
     };
