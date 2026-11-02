@@ -57,10 +57,11 @@ let
   # (config/ghostty.cfg): background, foreground, selection for the current space.
   themeScript = pkgs.writeShellScript "sketchybar-theme" ''
     if /usr/bin/defaults read -g AppleInterfaceStyle 2>/dev/null | /usr/bin/grep -q Dark; then
-      fg=0xffd4d4d4 bg=0xff1e1e1e hl=0xff313244
+      fg=0xffd4d4d4 bg=0xff1e1e1e hl=0xff313244 wp=${wallpaper "1e1e1e"}
     else
-      fg=0xff2a2c33 bg=0xfff9f9f9 hl=0xffe9e9e9
+      fg=0xff2a2c33 bg=0xfff9f9f9 hl=0xffe9e9e9 wp=${wallpaper "f9f9f9"}
     fi
+    ${desktoppr} "$wp"
     # Setting background.color also turns the background on, so turn it back
     # off and redraw only the spaces visible on some display.
     ${bar} --bar color=$bg \
@@ -70,6 +71,14 @@ let
       ${bar} --set space.$n background.drawing=on
     done
   '';
+  # A solid wallpaper in Ghostty's background colour, so the gap that shows
+  # for a moment while an app redraws at a new size matches the terminal.
+  wallpaper =
+    color:
+    pkgs.runCommand "wallpaper-${color}.png" { nativeBuildInputs = [ pkgs.imagemagick ]; } ''
+      magick -size 64x64 xc:'#${color}' $out
+    '';
+  desktoppr = lib.getExe pkgs.desktoppr;
   spaceScript = pkgs.writeShellScript "sketchybar-space" ''
     ${bar} --set "$NAME" background.drawing="$([ "$SELECTED" = true ] && echo on || echo off)"
   '';
@@ -109,10 +118,10 @@ in
       window_placement = "second_child";
       mouse_follows_focus = "off";
       focus_follows_mouse = "off";
-      # Not 0: during an animation yabai covers each window with a snapshot
-      # until the app has redrawn at its new size, so the wallpaper never shows
-      # through. With 0 it shows for a moment while apps catch up.
-      window_animation_duration = 0.1;
+      # Animation doesn't hide the gap while apps (Ghostty) redraw after a
+      # resize; the wallpaper is Ghostty's background colour instead (below).
+      window_animation_duration = 0;
+      window_shadow = "off";
       window_gap = 0;
       external_bar = "all:${toString barHeight}:0";
     };
