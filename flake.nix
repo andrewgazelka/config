@@ -19,6 +19,11 @@
       url = "github:andrewgazelka/notify";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    # Our yabai fork (darwin/yabai.nix); `nix flake update yabai` bumps it.
+    yabai = {
+      url = "github:andrewgazelka/yabai";
+      flake = false;
+    };
     crane.url = "github:ipetkov/crane";
     # A pinned toolchain with the aarch64-apple-darwin std, so Linux can
     # build the Mac's strata.

@@ -12,16 +12,11 @@
 # (`csrutil enable --without fs --without debug --without nvram` from
 # Recovery) and `nvram boot-args=-arm64e_preview_abi`. Without them yabai
 # still tiles, but can't switch, create or move spaces.
-{ lib, pkgs, ... }:
+{ inputs, lib, pkgs, ... }:
 let
   yabai = pkgs.yabai.overrideAttrs (old: {
-    version = "7.1.25-unstable-2026-11-02";
-    src = pkgs.fetchFromGitHub {
-      owner = "andrewgazelka";
-      repo = "yabai";
-      rev = "7f4956ed351c51316e9eb4b43049d6ef9876fc01";
-      hash = "sha256-aBAcWgS28bmRklHWwNvt3ErA4vRES7PHmW9aPhd4jjw=";
-    };
+    version = "7.1.25-unstable-${lib.substring 0 8 inputs.yabai.lastModifiedDate}";
+    src = inputs.yabai; # pinned in flake.lock
     # `yabai --version` prints upstream's 7.1.25, not this version.
     doInstallCheck = false;
   });
