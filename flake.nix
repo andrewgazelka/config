@@ -21,7 +21,7 @@
     };
     # Our yabai fork (darwin/yabai.nix); `nix flake update yabai` bumps it.
     yabai = {
-      url = "github:andrewgazelka/yabai";
+      url = "github:andrewgazelka/yabai/virtual-spaces";
       flake = false;
     };
     crane.url = "github:ipetkov/crane";

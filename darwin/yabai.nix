@@ -8,13 +8,14 @@
 # setting frames, so the wallpaper doesn't flash between windows). Its version
 # string is still upstream's 7.1.25.
 #
-# The scripting addition needs SIP partly off
-# (`csrutil enable --without fs --without debug --without nvram` from
-# Recovery) and `nvram boot-args=-arm64e_preview_abi`. Without them yabai
-# still tiles, but can't switch, create or move spaces.
+# Spaces are virtual (the fork's `virtual_spaces`, branch virtual-spaces):
+# each display keeps one macOS space, and switching hides the other spaces'
+# windows in the screen's corner like AeroSpace does. That needs no scripting
+# addition, so SIP stays fully on and yabai never creates native spaces (the
+# old create-ten-spaces loop once piled up 2000).
 { inputs, lib, pkgs, ... }:
 let
-  on = false;
+  on = true;
   yabai = pkgs.yabai.overrideAttrs (old: {
     version = "7.1.25-unstable-${lib.substring 0 8 inputs.yabai.lastModifiedDate}";
     src = inputs.yabai; # pinned in flake.lock
@@ -85,12 +86,13 @@ let
   '';
 in
 {
-  # Off for now (2026-11-03); flip back to true to re-enable yabai + skhd.
   services.yabai = {
     enable = on;
     package = yabai;
-    enableScriptingAddition = true;
+    enableScriptingAddition = false;
     config = {
+      virtual_spaces = "on";
+      virtual_space_count = 10;
       layout = "bsp";
       window_placement = "second_child";
       mouse_follows_focus = "off";
@@ -102,25 +104,6 @@ in
       window_gap = 0;
     };
     extraConfig = ''
-      # The Dock loses the scripting addition whenever it restarts.
-      ${y} -m signal --add event=dock_did_restart action="sudo ${y} --load-sa"
-      sudo ${y} --load-sa
-
-      # Ten spaces, like AeroSpace's ten workspaces. This runs on every yabai
-      # start and launchd restarts yabai whenever it exits, so a create that
-      # yabai's count doesn't see would pile up spaces (2000 once). Create one
-      # at a time, re-count, and stop as soon as a create doesn't add one.
-      n=$(${y} -m query --spaces | ${jq} length) || n=10
-      while [ "$n" -lt 10 ]; do
-        ${y} -m space --create || break
-        m=$(${y} -m query --spaces | ${jq} length) || break
-        if [ "$m" -le "$n" ]; then
-          echo "yabairc: space --create left $n spaces, stopping" >&2
-          break
-        fi
-        n=$m
-      done
-
       ${y} -m rule --add app='^(FaceTime|OBS Studio|OBS|Super Easy Timer|System Settings)$' manage=off
       ${y} -m rule --add app='^(Linear|Microsoft Excel|Notion)$' manage=on
       ${y} -m rule --apply

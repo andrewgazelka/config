@@ -184,15 +184,16 @@
     "yabai": {
       "flake": false,
       "locked": {
-        "lastModified": 1793607410,
-        "narHash": "sha256-aBAcWgS28bmRklHWwNvt3ErA4vRES7PHmW9aPhd4jjw=",
+        "lastModified": 1793779342,
+        "narHash": "sha256-HbYXdMYAzVPZytT+75tEBWV1YlbffADTXH8U3PAlKgI=",
         "owner": "andrewgazelka",
         "repo": "yabai",
-        "rev": "7f4956ed351c51316e9eb4b43049d6ef9876fc01",
+        "rev": "0e8fd0c5456c5a34fecc31d94452578af8cd3072",
         "type": "github"
       },
       "original": {
         "owner": "andrewgazelka",
+        "ref": "virtual-spaces",
         "repo": "yabai",
         "type": "github"
       }
