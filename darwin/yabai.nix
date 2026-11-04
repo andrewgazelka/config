@@ -14,6 +14,7 @@
 # still tiles, but can't switch, create or move spaces.
 { inputs, lib, pkgs, ... }:
 let
+  on = false;
   yabai = pkgs.yabai.overrideAttrs (old: {
     version = "7.1.25-unstable-${lib.substring 0 8 inputs.yabai.lastModifiedDate}";
     src = inputs.yabai; # pinned in flake.lock
@@ -84,8 +85,9 @@ let
   '';
 in
 {
+  # Off for now (2026-11-03); flip back to true to re-enable yabai + skhd.
   services.yabai = {
-    enable = true;
+    enable = on;
     package = yabai;
     enableScriptingAddition = true;
     config = {
@@ -104,9 +106,19 @@ in
       ${y} -m signal --add event=dock_did_restart action="sudo ${y} --load-sa"
       sudo ${y} --load-sa
 
-      # Ten spaces, like AeroSpace's ten workspaces.
-      for _ in $(seq "$(${y} -m query --spaces | ${jq} length)" 9); do
-        ${y} -m space --create
+      # Ten spaces, like AeroSpace's ten workspaces. This runs on every yabai
+      # start and launchd restarts yabai whenever it exits, so a create that
+      # yabai's count doesn't see would pile up spaces (2000 once). Create one
+      # at a time, re-count, and stop as soon as a create doesn't add one.
+      n=$(${y} -m query --spaces | ${jq} length) || n=10
+      while [ "$n" -lt 10 ]; do
+        ${y} -m space --create || break
+        m=$(${y} -m query --spaces | ${jq} length) || break
+        if [ "$m" -le "$n" ]; then
+          echo "yabairc: space --create left $n spaces, stopping" >&2
+          break
+        fi
+        n=$m
       done
 
       ${y} -m rule --add app='^(FaceTime|OBS Studio|OBS|Super Easy Timer|System Settings)$' manage=off
@@ -134,11 +146,11 @@ in
   # skhd and yabai signals run commands with $SHELL -c. The login shell is
   # nushell, which has no `||` or `$(...)`, so the bindings below failed
   # silently under it.
-  launchd.user.agents.skhd.serviceConfig.EnvironmentVariables.SHELL = "/bin/sh";
-  launchd.user.agents.yabai.serviceConfig.EnvironmentVariables.SHELL = "/bin/sh";
+  launchd.user.agents.skhd = lib.mkIf on { serviceConfig.EnvironmentVariables.SHELL = "/bin/sh"; };
+  launchd.user.agents.yabai = lib.mkIf on { serviceConfig.EnvironmentVariables.SHELL = "/bin/sh"; };
 
   services.skhd = {
-    enable = true;
+    enable = on;
     skhdConfig =
       perSpace (n: ''
         alt - ${key n} : ${y} -m space --focus ${toString n}
